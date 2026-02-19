@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Tidal Collaborative — Admin</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<!-- ===================== HEADER ===================== -->
+<header class="header">
+  <div class="header-left">
+    <svg class="logo-icon" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <rect width="32" height="32" rx="8" fill="var(--accent)"/>
+      <path d="M7 16 L10 10 L14 22 L18 13 L21 18 L25 16" stroke="white" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+    </svg>
+    <span class="logo-text">Tidal Collaborative</span>
+    <span class="logo-badge">Admin</span>
+  </div>
+  <div class="header-right">
+    <div id="ws-status" class="ws-status ws-disconnected">
+      <span class="ws-dot"></span>
+      <span class="ws-label">Connecting…</span>
+    </div>
+    <span class="server-url" id="server-url"></span>
+  </div>
+</header>
+
+<!-- ===================== MAIN ===================== -->
+<main class="main">
+
+  <!-- Stats -->
+  <section class="stats-grid" aria-label="Server statistics">
+    <div class="stat-card">
+      <div class="stat-value" id="stat-playlists">—</div>
+      <div class="stat-label">Shared Playlists</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-value" id="stat-tracks">—</div>
+      <div class="stat-label">Total Tracks</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-value" id="stat-users">—</div>
+      <div class="stat-label">Linked Users</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-value" id="stat-online">—</div>
+      <div class="stat-label">Recently Active</div>
+    </div>
+  </section>
+
+  <!-- Playlists -->
+  <section class="section">
+    <div class="section-header">
+      <h2 class="section-title">Shared Playlists</h2>
+      <button class="btn btn-primary" id="open-create-btn">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+        New Playlist
+      </button>
+    </div>
+    <div id="playlists-grid" class="playlists-grid">
+      <div class="loading-state"><div class="spinner"></div><span>Loading playlists…</span></div>
+    </div>
+  </section>
+
+  <!-- Users -->
+  <section class="section">
+    <div class="section-header">
+      <h2 class="section-title">Recent Users</h2>
+      <button class="btn btn-ghost btn-sm" id="refresh-btn" title="Refresh data">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true">
+          <path d="M1 4v6h6M23 20v-6h-6"/>
+          <path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4-4.64 4.36A9 9 0 0 1 3.51 15"/>
+        </svg>
+        Refresh
+      </button>
+    </div>
+    <div id="users-list" class="users-list">
+      <div class="loading-state"><div class="spinner"></div><span>Loading users…</span></div>
+    </div>
+  </section>
+
+</main>
+
+<!-- ===================== CREATE MODAL ===================== -->
+<div id="create-modal" class="modal-overlay" aria-hidden="true" role="dialog" aria-labelledby="create-modal-title" aria-modal="true">
+  <div class="modal">
+    <div class="modal-header">
+      <h3 class="modal-title" id="create-modal-title">New Shared Playlist</h3>
+      <button class="modal-close" data-close="create-modal" aria-label="Close dialog">&times;</button>
+    </div>
+    <form id="create-form" class="modal-body" novalidate>
+      <div class="form-group">
+        <label class="form-label" for="pl-name">
+          Name <span class="required" aria-hidden="true">*</span>
+        </label>
+        <input
+          class="form-input"
+          id="pl-name"
+          type="text"
+          placeholder="e.g. Summer Vibes"
+          maxlength="100"
+          required
+          autocomplete="off"
+        />
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="pl-desc">
+          Description <span class="optional">(optional)</span>
+        </label>
+        <textarea
+          class="form-input form-textarea"
+          id="pl-desc"
+          placeholder="What's this playlist about?"
+          maxlength="300"
+          rows="3"
+        ></textarea>
+      </div>
+      <p class="form-error" id="create-error" role="alert"></p>
+    </form>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" data-close="create-modal">Cancel</button>
+      <button class="btn btn-primary" id="create-submit-btn" type="submit" form="create-form">
+        <span class="btn-label">Create Playlist</span>
+        <span class="btn-spinner" hidden aria-hidden="true"></span>
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- ===================== VIEW MODAL ===================== -->
+<div id="view-modal" class="modal-overlay" aria-hidden="true" role="dialog" aria-labelledby="view-modal-title" aria-modal="true">
+  <div class="modal modal-wide">
+    <div class="modal-header">
+      <div>
+        <h3 class="modal-title" id="view-modal-title">Playlist</h3>
+        <p class="modal-subtitle" id="view-modal-subtitle"></p>
+      </div>
+      <button class="modal-close" data-close="view-modal" aria-label="Close dialog">&times;</button>
+    </div>
+    <div class="modal-body" id="view-modal-body">
+      <div class="loading-state"><div class="spinner"></div><span>Loading tracks…</span></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" data-close="view-modal">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===================== TOASTS ===================== -->
+<div id="toast-container" class="toast-container" aria-live="polite" aria-atomic="false"></div>
+
+<script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,41 @@
+# ── Docker build exclusions ───────────────────────────────────────────────
+# This file lives at the repo ROOT (the Docker build context).
+# docker/Dockerfile + docker/docker-compose.yml both use the root as context.
+
+# Node.js
+node_modules/
+server/node_modules/
+npm-debug.log*
+
+# Runtime data (populated at run-time, not baked into the image)
+data/
+docker/data/
+
+# Secrets
+.env
+.env.*
+*.key
+*.pem
+
+# Version control
+.git/
+.gitignore
+
+# Extension — not served by the Docker container
+extension/
+
+# Documentation
+docs/
+*.md
+!README.md
+
+# Build artefacts
+dist/
+*.zip
+*.crx
+
+# Editor / OS noise
+.DS_Store
+.vscode/
+.idea/
+Thumbs.db

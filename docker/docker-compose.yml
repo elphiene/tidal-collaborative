@@ -1,0 +1,42 @@
+services:
+  tidal-collaborative:
+    build:
+      # Build context is the repo root so COPY can reach server/ and web-ui/
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: tidal-collaborative:latest
+    container_name: tidal-collaborative
+    restart: unless-stopped
+
+    ports:
+      - "3000:3000"
+
+    volumes:
+      # SQLite database — survives container restarts and image rebuilds.
+      # On CasaOS this lands at  <repo>/docker/data/db.sqlite
+      - ./data:/app/data
+
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - DB_PATH=/app/data/db.sqlite
+
+    networks:
+      - tidal-network
+
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:3000/api/ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+    # Resource limits — reasonable for a home-lab SQLite server
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+networks:
+  tidal-network:
+    driver: bridge

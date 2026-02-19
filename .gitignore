@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+
+# Runtime data
+data/
+docker/data/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+
+# Build artifacts
+dist/
+*.zip
+*.crx
+
+# Editor / IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*

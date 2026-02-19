@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Tidal Collaborative</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+
+<!-- ═══════════════════════════ SETUP VIEW ═══════════════════════════════ -->
+<div id="setup-view" class="view" hidden>
+  <div class="setup-hero">
+    <svg class="hero-logo" viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <rect width="40" height="40" rx="10" fill="#1db954"/>
+      <path d="M8 20 L12 12 L17 28 L22 16 L26 22 L32 20"
+            stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+    <h1 class="hero-title">Tidal Collaborative</h1>
+    <p class="hero-sub">Real-time shared playlists</p>
+  </div>
+
+  <div class="setup-body">
+    <div class="form-group">
+      <label class="form-label" for="server-url-input">Server URL</label>
+      <input
+        id="server-url-input"
+        class="form-input"
+        type="url"
+        placeholder="http://192.168.100.31:3000"
+        autocomplete="off"
+        spellcheck="false"
+      />
+    </div>
+    <p class="form-hint">Your self-hosted server (requires VPN from outside home)</p>
+    <p id="setup-error" class="error-msg" hidden></p>
+  </div>
+
+  <div class="setup-footer">
+    <button id="connect-btn" class="btn btn-primary btn-full">
+      <span class="btn-label">Connect to Server</span>
+      <span class="btn-spinner" hidden></span>
+    </button>
+  </div>
+</div>
+
+<!-- ═══════════════════════════ MAIN VIEW ════════════════════════════════ -->
+<div id="main-view" class="view" hidden>
+  <!-- Header row: status + URL + settings -->
+  <header class="popup-header">
+    <div class="status-row">
+      <div id="ws-indicator" class="status-dot dot-offline" title="WebSocket status"></div>
+      <span id="header-url" class="header-url"></span>
+    </div>
+    <button id="settings-btn" class="icon-btn" title="Change server">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="12" cy="12" r="3"/>
+        <path d="M19.07 4.93A10 10 0 0 0 4.93 19.07M19.07 19.07A10 10 0 0 0 4.93 4.93"/>
+        <path d="M12 2v2m0 16v2M2 12h2m16 0h2"/>
+      </svg>
+    </button>
+  </header>
+
+  <!-- Token warning (shown when Tidal tab not open) -->
+  <div id="token-warning" class="warning-banner" hidden>
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+      <line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
+    </svg>
+    Open <strong>listen.tidal.com</strong> to activate sync
+  </div>
+
+  <!-- Linked playlists -->
+  <div class="section">
+    <div class="section-header">
+      <span class="section-title">Linked Playlists</span>
+      <button id="link-new-btn" class="btn btn-primary btn-xs">
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3">
+          <path d="M12 5v14M5 12h14"/>
+        </svg>
+        Link
+      </button>
+    </div>
+    <div id="linked-list" class="scroll-area">
+      <!-- Filled by JS -->
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════ LINKING VIEW ═════════════════════════════ -->
+<div id="linking-view" class="view" hidden>
+  <header class="popup-header">
+    <button id="back-btn" class="icon-btn icon-btn-label" title="Back">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+        <path d="M19 12H5m7-7-7 7 7 7"/>
+      </svg>
+      Back
+    </button>
+    <span id="linking-step-label" class="step-label">Step 1 of 2</span>
+    <button id="cancel-link-btn" class="icon-btn" title="Cancel">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+        <path d="M18 6 6 18M6 6l12 12"/>
+      </svg>
+    </button>
+  </header>
+
+  <!-- Step 1: Pick Tidal playlist -->
+  <div id="step-1" class="step-panel">
+    <p class="step-heading">Which Tidal playlist should sync?</p>
+    <div id="tidal-playlists-list" class="scroll-area">
+      <div class="loading-row"><div class="spinner"></div> Loading your playlists…</div>
+    </div>
+  </div>
+
+  <!-- Step 2: Pick shared playlist -->
+  <div id="step-2" class="step-panel" hidden>
+    <div class="selection-badge" id="selected-tidal-badge">
+      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+        <path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/>
+      </svg>
+      <span id="selected-tidal-name"></span>
+    </div>
+    <p class="step-heading">Link to which shared playlist?</p>
+    <div id="shared-playlists-list" class="scroll-area">
+      <div class="loading-row"><div class="spinner"></div> Loading shared playlists…</div>
+    </div>
+    <div class="step-footer">
+      <button id="confirm-link-btn" class="btn btn-primary btn-full" disabled>
+        <span class="btn-label">Link &amp; Sync</span>
+        <span class="btn-spinner" hidden></span>
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════ TOASTS ════════════════════════════════════ -->
+<div id="toast-container" class="toast-container"></div>
+
+<script src="popup.js"></script>
+</body>
+</html>
