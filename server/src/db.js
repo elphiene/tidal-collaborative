@@ -25,6 +25,11 @@ function init() {
   );
   db.exec(schema);
 
+  // Migrations: add new columns if they don't exist (safe to run multiple times)
+  try {
+    db.exec('ALTER TABLE playlist_links ADD COLUMN tidal_playlist_name TEXT');
+  } catch { /* column already exists */ }
+
   console.log(`[db] opened ${config.DB_PATH}`);
   return db;
 }
@@ -88,11 +93,11 @@ function getPlaylistLinks(sharedPlaylistId) {
   ).all(sharedPlaylistId);
 }
 
-function createLink(sharedPlaylistId, userId, tidalPlaylistId) {
+function createLink(sharedPlaylistId, userId, tidalPlaylistId, tidalPlaylistName = null) {
   const info = db.prepare(`
-    INSERT INTO playlist_links (shared_playlist_id, user_id, tidal_playlist_id)
-    VALUES (?, ?, ?)
-  `).run(sharedPlaylistId, userId, tidalPlaylistId);
+    INSERT INTO playlist_links (shared_playlist_id, user_id, tidal_playlist_id, tidal_playlist_name)
+    VALUES (?, ?, ?, ?)
+  `).run(sharedPlaylistId, userId, tidalPlaylistId, tidalPlaylistName);
   return db.prepare('SELECT * FROM playlist_links WHERE id = ?').get(info.lastInsertRowid);
 }
 
@@ -105,6 +110,15 @@ function checkLinkExists(sharedPlaylistId, userId) {
     SELECT id FROM playlist_links
     WHERE shared_playlist_id = ? AND user_id = ?
   `).get(sharedPlaylistId, userId);
+}
+
+function getLinkedUsers(sharedPlaylistId) {
+  return db.prepare(`
+    SELECT pl.user_id, pl.tidal_playlist_name, pl.tidal_playlist_id, pl.created_at
+    FROM playlist_links pl
+    WHERE pl.shared_playlist_id = ?
+    ORDER BY pl.created_at ASC
+  `).all(sharedPlaylistId);
 }
 
 // ---------------------------------------------------------------------------
@@ -218,6 +232,7 @@ module.exports = {
   createLink,
   deleteLink,
   checkLinkExists,
+  getLinkedUsers,
   // tracks
   getPlaylistTracks,
   addTrack,

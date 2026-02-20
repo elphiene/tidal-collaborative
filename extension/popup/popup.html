@@ -33,6 +33,23 @@
       />
     </div>
     <p class="form-hint">Your self-hosted server (requires VPN from outside home)</p>
+
+    <div class="form-group" style="margin-top: 16px;">
+      <label class="form-label" for="token-input">Tidal Access Token</label>
+      <input
+        id="token-input"
+        class="form-input"
+        type="password"
+        placeholder="eyJraWQiOiJ2OU1GbFhqWSIs..."
+        autocomplete="off"
+        spellcheck="false"
+      />
+    </div>
+    <p class="form-hint">
+      Go to <strong>tidal.com</strong>, open DevTools (F12), Network tab,
+      click any request, copy the <code>Authorization: Bearer ...</code> header value (without "Bearer ")
+    </p>
+
     <p id="setup-error" class="error-msg" hidden></p>
   </div>
 
@@ -60,6 +77,11 @@
       </svg>
     </button>
   </header>
+
+  <!-- User info bar -->
+  <div class="user-info">
+    <span id="user-id-badge">Tidal ID: <strong id="user-id-value">—</strong></span>
+  </div>
 
   <!-- Token warning (shown when Tidal tab not open) -->
   <div id="token-warning" class="warning-banner" hidden>

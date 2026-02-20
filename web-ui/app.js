@@ -98,6 +98,12 @@ async function fetchTracks(playlistId) {
   return res.json();
 }
 
+async function fetchLinkedUsers(playlistId) {
+  const res = await fetch(`${BASE_URL}/api/shared-playlists/${playlistId}/linked-users`);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
 // ---------------------------------------------------------------------------
 // Render: Stats
 // ---------------------------------------------------------------------------
@@ -326,21 +332,104 @@ async function openViewModal(id) {
   document.getElementById('view-modal-title').textContent    = pl.name;
   document.getElementById('view-modal-subtitle').textContent =
     `${pl.track_count} track${pl.track_count !== 1 ? 's' : ''} · ${pl.user_count} user${pl.user_count !== 1 ? 's' : ''}`;
-  document.getElementById('view-modal-body').innerHTML =
-    '<div class="loading-state"><div class="spinner"></div><span>Loading tracks…</span></div>';
+
+  // Add tabs for tracks and users
+  document.getElementById('view-modal-body').innerHTML = `
+    <div class="view-modal-tabs">
+      <button class="tab-button tab-active" data-tab="tracks">Tracks</button>
+      <button class="tab-button" data-tab="users">Linked Users</button>
+    </div>
+    <div id="tab-tracks" class="tab-content">
+      <div class="loading-state"><div class="spinner"></div><span>Loading tracks…</span></div>
+    </div>
+    <div id="tab-users" class="tab-content" style="display:none">
+      <div class="loading-state"><div class="spinner"></div><span>Loading users…</span></div>
+    </div>`;
 
   openModal('view-modal');
+
+  // Add tab click handlers
+  document.querySelectorAll('.tab-button').forEach((btn) => {
+    btn.addEventListener('click', () => switchTab(btn.dataset.tab, id));
+  });
 
   try {
     const tracks = await fetchTracks(id);
     renderTracksInModal(tracks, pl);
   } catch (err) {
-    document.getElementById('view-modal-body').innerHTML = `
+    document.getElementById('tab-tracks').innerHTML = `
       <div class="empty-state">
         <p class="empty-title">Failed to load tracks</p>
         <p class="empty-sub">${escHtml(err.message)}</p>
       </div>`;
   }
+}
+
+function switchTab(tabName, playlistId) {
+  // Update active tab button
+  document.querySelectorAll('.tab-button').forEach((btn) => {
+    btn.classList.toggle('tab-active', btn.dataset.tab === tabName);
+  });
+
+  // Show/hide tab content
+  document.querySelectorAll('.tab-content').forEach((el) => {
+    el.style.display = 'none';
+  });
+  document.getElementById(`tab-${tabName}`).style.display = 'block';
+
+  // Load users if switching to users tab
+  if (tabName === 'users') {
+    loadLinkedUsersTab(playlistId);
+  }
+}
+
+async function loadLinkedUsersTab(playlistId) {
+  const el = document.getElementById('tab-users');
+  try {
+    const users = await fetchLinkedUsers(playlistId);
+    renderLinkedUsersInModal(users);
+  } catch (err) {
+    el.innerHTML = `
+      <div class="empty-state">
+        <p class="empty-title">Failed to load linked users</p>
+        <p class="empty-sub">${escHtml(err.message)}</p>
+      </div>`;
+  }
+}
+
+function renderLinkedUsersInModal(users) {
+  const el = document.getElementById('tab-users');
+
+  if (users.length === 0) {
+    el.innerHTML = `
+      <div class="empty-state">
+        <div class="empty-icon">👥</div>
+        <p class="empty-title">No users linked yet</p>
+        <p class="empty-sub">
+          Users will appear here once they link this playlist via the browser extension.
+        </p>
+      </div>`;
+    return;
+  }
+
+  const rows = users.map((u) => `
+    <tr>
+      <td class="user-id">${escHtml(u.user_id)}</td>
+      <td>${escHtml(u.tidal_playlist_name || '—')}</td>
+      <td class="text-muted">${formatDate(u.created_at)}</td>
+    </tr>`).join('');
+
+  el.innerHTML = `
+    <table class="users-table">
+      <thead>
+        <tr>
+          <th>User ID</th>
+          <th>Tidal Playlist Name</th>
+          <th>Linked At</th>
+        </tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>`;
 }
 
 function renderTracksInModal(tracks, pl) {

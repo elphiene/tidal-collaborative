@@ -51,7 +51,11 @@ async function init() {
     state.wsConnected = bgState.wsConnected  ?? false;
     state.userId      = bgState.userId       ?? null;
     state.hasToken    = bgState.hasToken     ?? false;
-  } catch { /* worker not running yet — graceful degradation */ }
+    console.log('[popup] init: got state from background', bgState);
+  } catch (err) {
+    console.error('[popup] init: failed to get state from background', err);
+    /* worker not running yet — graceful degradation */
+  }
 
   if (state.serverUrl) {
     showView('main');
@@ -147,35 +151,43 @@ function updateStatusBar() {
 // ---------------------------------------------------------------------------
 
 async function handleConnect() {
-  const input = byId('server-url-input');
-  const url   = input.value.trim();
+  const serverInput = byId('server-url-input');
+  const tokenInput = byId('token-input');
+  const serverUrl = serverInput.value.trim();
+  const token = tokenInput.value.trim();
   const errEl = byId('setup-error');
-  const btn   = byId('connect-btn');
+  const btn = byId('connect-btn');
 
-  errEl.hidden      = true;
+  errEl.hidden = true;
   errEl.textContent = '';
 
-  if (!url) {
+  if (!serverUrl) {
     showFormError('Please enter the server URL');
-    input.focus();
+    serverInput.focus();
+    return;
+  }
+
+  if (!token) {
+    showFormError('Please paste your Tidal access token');
+    tokenInput.focus();
     return;
   }
 
   // Normalise: strip trailing slash
-  let serverUrl;
+  let normalizedUrl;
   try {
-    const parsed = new URL(url);
-    serverUrl = parsed.origin; // strips path/search/hash
+    const parsed = new URL(serverUrl);
+    normalizedUrl = parsed.origin; // strips path/search/hash
   } catch {
     showFormError('Invalid URL — include http:// or https://');
-    input.focus();
+    serverInput.focus();
     return;
   }
 
   setLoadingBtn(btn, true);
 
   try {
-    const res = await fetchWithTimeout(`${serverUrl}/api/ping`, {}, 5_000);
+    const res = await fetchWithTimeout(`${normalizedUrl}/api/ping`, {}, 5_000);
     if (!res.ok) throw new Error(`Server responded with HTTP ${res.status}`);
     const body = await res.json();
     if (!body.ok) throw new Error('Unexpected server response');
@@ -189,9 +201,10 @@ async function handleConnect() {
     return;
   }
 
-  // Save and connect
-  state.serverUrl = serverUrl;
-  await msgBackground('save_server_url', { serverUrl });
+  // Save server URL and send token to background worker
+  state.serverUrl = normalizedUrl;
+  await msgBackground('save_server_url', { serverUrl: normalizedUrl });
+  await msgBackground('set_tidal_token', { token });
 
   setLoadingBtn(btn, false);
   showView('main');
@@ -210,7 +223,15 @@ function showFormError(msg) {
 
 async function loadMainView() {
   updateStatusBar();
+  updateUserInfo();
   renderLinkedPlaylists();
+}
+
+function updateUserInfo() {
+  const userIdEl = byId('user-id-value');
+  const displayId = state.userId ?? '—';
+  console.log('[popup] updateUserInfo: setting to', displayId, 'state.userId=', state.userId);
+  userIdEl.textContent = displayId;
 }
 
 function renderLinkedPlaylists() {
@@ -524,8 +545,9 @@ async function confirmLink() {
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify({
         sharedPlaylistId,
-        userId:          state.userId,
+        userId:            state.userId,
         tidalPlaylistId,
+        tidalPlaylistName: tidalName,
       }),
     });
 

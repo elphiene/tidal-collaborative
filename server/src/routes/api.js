@@ -94,10 +94,10 @@ router.get('/links/:userId', (req, res) => {
 });
 
 // POST /api/links
-// Body: { sharedPlaylistId: number, userId: string, tidalPlaylistId: string }
+// Body: { sharedPlaylistId: number, userId: string, tidalPlaylistId: string, tidalPlaylistName?: string }
 // Returns: { link, tracks } — tracks used by the extension for initial sync.
 router.post('/links', (req, res) => {
-  const { sharedPlaylistId, userId, tidalPlaylistId } = req.body ?? {};
+  const { sharedPlaylistId, userId, tidalPlaylistId, tidalPlaylistName } = req.body ?? {};
 
   if (!sharedPlaylistId || !userId || !tidalPlaylistId) {
     return res.status(400).json({
@@ -121,7 +121,7 @@ router.post('/links', (req, res) => {
       return res.status(409).json({ error: 'Already linked', linkId: existing.id });
     }
 
-    const link   = db.createLink(spId, userId.trim(), tidalPlaylistId.trim());
+    const link   = db.createLink(spId, userId.trim(), tidalPlaylistId.trim(), tidalPlaylistName || null);
     const tracks = db.getPlaylistTracks(spId);
     res.status(201).json({ link, tracks });
   } catch (err) {
@@ -141,6 +141,21 @@ router.delete('/links/:id', (req, res) => {
     res.json({ ok: true });
   } catch (err) {
     console.error('[api] DELETE /links/:id', err.message);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// GET /api/shared-playlists/:id/linked-users
+// Returns all users linked to a shared playlist with their Tidal playlist names
+router.get('/shared-playlists/:id/linked-users', (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (isNaN(id)) return res.status(400).json({ error: 'Invalid id' });
+
+  try {
+    const users = db.getLinkedUsers(id);
+    res.json(users);
+  } catch (err) {
+    console.error('[api] GET /shared-playlists/:id/linked-users', err.message);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

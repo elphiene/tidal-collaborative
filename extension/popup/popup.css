@@ -46,6 +46,16 @@ svg { display: block; flex-shrink: 0; }
 .view { display: flex; flex-direction: column; }
 .view[hidden] { display: none; }
 
+/* ─── User info bar ──────────────────────────────────────────────── */
+.user-info {
+  background: var(--bg-card);
+  padding: 10px 14px;
+  font-size: .75rem;
+  color: var(--text-2);
+  border-bottom: 1px solid var(--border);
+}
+.user-info strong { color: var(--accent); font-weight: 600; }
+
 /* ─── Shared header ──────────────────────────────────────────────── */
 .popup-header {
   display: flex;
@@ -166,6 +176,7 @@ svg { display: block; flex-shrink: 0; }
   box-shadow: 0 0 0 3px var(--accent-dim);
 }
 .form-hint { font-size: .72rem; color: var(--text-3); margin-top: -.2rem; margin-bottom: .75rem; }
+.form-hint code { font-family: 'Monaco', 'Courier New', monospace; background: var(--bg-input); padding: 2px 4px; border-radius: 3px; color: var(--accent); }
 .error-msg { font-size: .78rem; color: var(--danger); margin-top: .25rem; }
 .error-msg[hidden] { display: none; }
 

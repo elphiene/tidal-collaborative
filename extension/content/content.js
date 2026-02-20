@@ -212,9 +212,12 @@ function interceptXHR() {
   // --- Capture token from outgoing Authorization headers ---
   const originalSetHeader = XMLHttpRequest.prototype.setRequestHeader;
   XMLHttpRequest.prototype.setRequestHeader = function (header, value) {
-    if (header.toLowerCase() === 'authorization' && typeof value === 'string') {
-      const match = value.match(/^Bearer (.+)$/i);
-      if (match) captureCredentials(match[1], userIdFromJWT(match[1]));
+    if (header.toLowerCase() === 'authorization') {
+      log(`XHR Authorization header: ${String(value).slice(0, 30)}…`);
+      if (typeof value === 'string') {
+        const match = value.match(/^Bearer (.+)$/i);
+        if (match) captureCredentials(match[1], userIdFromJWT(match[1]));
+      }
     }
     return originalSetHeader.apply(this, arguments);
   };
@@ -260,6 +263,7 @@ function interceptFetch() {
       }
 
       if (authValue) {
+        log(`fetch() Authorization header: ${String(authValue).slice(0, 30)}…`);
         const match = authValue.match(/^Bearer (.+)$/i);
         if (match) captureCredentials(match[1], userIdFromJWT(match[1]));
       }

@@ -164,7 +164,15 @@ function connectWebSocket() {
     state.isConnecting      = false;
     state.reconnectAttempts = 0;
 
-    wsSend({ type: 'auth', payload: { user_id: state.userId } });
+    // Send auth with all linked playlist IDs for presence tracking
+    const linkedPlaylistIds = Array.from(state.linkedPlaylists.keys());
+    wsSend({
+      type: 'auth',
+      payload: {
+        user_id: state.userId,
+        shared_playlist_ids: linkedPlaylistIds,
+      },
+    });
     broadcastStatus(true);
   });
 
@@ -210,8 +218,7 @@ function wsSend(obj) {
 
 function ensureConnected() {
   if (state.ws?.readyState === WebSocket.OPEN) {
-    // Heartbeat ping so the server knows we're still alive
-    wsSend({ type: 'ping' });
+    // Connection is alive; keepalive alarm ensures we stay connected
   } else {
     connectWebSocket();
   }
@@ -358,6 +365,39 @@ async function handleExtensionMessage(msg, _sender) {
 
       // Re-authenticate with the sync server if credentials changed
       if (changed && state.serverUrl) {
+        state.reconnectAttempts = 0;
+        connectWebSocket();
+      }
+
+      return { ok: true };
+    }
+
+    // ------------------------------------------- set_tidal_token (popup manual entry)
+    case 'set_tidal_token': {
+      const { token } = msg;
+      if (!token) return { error: 'Token is required' };
+
+      state.tidalAccessToken = token;
+      await chrome.storage.local.set({ tidalAccessToken: token });
+      log('tidal token set manually from popup');
+
+      // Try to extract user ID from JWT payload
+      try {
+        const payloadB64 = token.split('.')[1];
+        if (payloadB64) {
+          const json = atob(payloadB64.replace(/-/g, '+').replace(/_/g, '/'));
+          const payload = JSON.parse(json);
+          const uid = String(payload.uid ?? payload.userId ?? payload.sub ?? '');
+          if (uid && uid !== state.userId) {
+            state.userId = uid;
+            await chrome.storage.local.set({ userId: uid });
+            log(`extracted userId from token: ${uid}`);
+          }
+        }
+      } catch { /* ignore JWT parse errors */ }
+
+      // Reconnect to sync server with new credentials
+      if (state.serverUrl) {
         state.reconnectAttempts = 0;
         connectWebSocket();
       }

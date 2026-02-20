@@ -104,7 +104,7 @@ function handleMessage(ws, raw) {
 // ---------------------------------------------------------------------------
 
 /**
- * Payload: { user_id: string, shared_playlist_id?: number }
+ * Payload: { user_id: string, shared_playlist_ids?: Array<number> }
  */
 function handleAuth(ws, payload) {
   const userId = payload?.user_id?.trim?.();
@@ -123,20 +123,23 @@ function handleAuth(ws, payload) {
   ws.isAuthenticated = true;
   clients.set(userId, ws);
 
-  // Best-effort presence update
-  const spId = payload?.shared_playlist_id != null
-    ? parseInt(payload.shared_playlist_id, 10)
-    : null;
+  // Best-effort presence update for all linked playlists
+  const playlistIds = Array.isArray(payload?.shared_playlist_ids)
+    ? payload.shared_playlist_ids
+    : [];
 
-  if (spId && !isNaN(spId)) {
-    try {
-      db.updateUserLastSeen(userId, spId);
-    } catch (err) {
-      console.warn(`[ws] updateUserLastSeen failed for ${userId}: ${err.message}`);
+  for (const id of playlistIds) {
+    const spId = parseInt(id, 10);
+    if (spId && !isNaN(spId)) {
+      try {
+        db.updateUserLastSeen(userId, spId);
+      } catch (err) {
+        console.warn(`[ws] updateUserLastSeen failed for ${userId} on playlist ${spId}: ${err.message}`);
+      }
     }
   }
 
-  console.log(`[ws] user ${userId} authenticated (${clients.size} online)`);
+  console.log(`[ws] user ${userId} authenticated (${clients.size} online, ${playlistIds.length} playlists)`);
   send(ws, { type: 'auth_ok', user_id: userId, ts: Date.now() });
 }
 

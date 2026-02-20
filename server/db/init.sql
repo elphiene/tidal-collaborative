@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS playlist_links (
   shared_playlist_id INTEGER NOT NULL REFERENCES shared_playlists(id) ON DELETE CASCADE,
   user_id            TEXT    NOT NULL,  -- Tidal user ID
   tidal_playlist_id  TEXT    NOT NULL,  -- local Tidal playlist UUID
+  tidal_playlist_name TEXT,             -- local Tidal playlist name (for display)
   created_at         INTEGER NOT NULL DEFAULT (unixepoch()),
   UNIQUE(shared_playlist_id, user_id)
 );

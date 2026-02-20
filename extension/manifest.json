@@ -9,6 +9,7 @@
     "notifications"
   ],
   "host_permissions": [
+    "https://tidal.com/*",
     "https://listen.tidal.com/*",
     "https://api.tidal.com/*",
     "http://*/*"
@@ -18,9 +19,9 @@
   },
   "content_scripts": [
     {
-      "matches": ["https://listen.tidal.com/*"],
+      "matches": ["https://tidal.com/*", "https://listen.tidal.com/*"],
       "js": ["content/content.js"],
-      "run_at": "document_idle"
+      "run_at": "document_start"
     }
   ],
   "action": {
