@@ -9,17 +9,13 @@ services:
 
     volumes:
       # SQLite database — survives container restarts and image rebuilds.
-      # On CasaOS this lands at  <repo>/docker/data/db.sqlite
-      - ./data:/app/data
+      # Secrets (encryption key, session secret) are also stored here.
+      - /DATA/AppData/tidal-collaborative:/app/data
 
     environment:
       - NODE_ENV=production
       - PORT=3000
       - DB_PATH=/app/data/db.sqlite
-      # Generate once: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
-      - ENCRYPTION_KEY=
-      # Generate once: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
-      - SESSION_SECRET=
 
     networks:
       - tidal-network

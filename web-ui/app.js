@@ -73,7 +73,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     btn.addEventListener('click', () => switchView(btn.dataset.view));
   });
 
-  // PIN inputs
+  // PIN inputs (modal)
   initPinInputs();
 
   // Link modal controls
@@ -101,9 +101,213 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.querySelectorAll('.modal-overlay.modal-open').forEach((m) => closeModal(m.id));
   });
 
-  // Check auth state
-  await checkAuth();
+  // Run setup wizard check — calls checkAuth() when complete
+  await initSetupWizard();
 });
+
+// ---------------------------------------------------------------------------
+// Setup Wizard
+// ---------------------------------------------------------------------------
+
+async function initSetupWizard() {
+  const overlay = document.getElementById('setup-overlay');
+
+  let status;
+  try {
+    const res = await fetch(`${BASE_URL}/api/setup/status`);
+    status = await res.json();
+  } catch {
+    status = { complete: false, clientIdSet: false, adminPinSet: false };
+  }
+
+  if (status.complete) {
+    overlay.remove();
+    await checkAuth();
+    return;
+  }
+
+  // Show overlay
+  overlay.hidden = false;
+
+  // Wire up Continue button and copy button
+  document.getElementById('setup-next-btn').addEventListener('click', handleSetupNext);
+  document.getElementById('setup-copy-uri').addEventListener('click', handleSetupCopy);
+
+  // Wire up setup PIN digit inputs (scoped to setup overlay)
+  initSetupPinInputs();
+
+  // Step 1 always shows first — secrets are confirmed ready once server responds
+  goToSetupStep(1);
+
+  // Auto-advance: show success state briefly, then go to the right step
+  setTimeout(() => {
+    const statusEl = document.getElementById('setup-step-1-status');
+    if (statusEl) statusEl.innerHTML = '<div class="setup-check">✓</div>';
+    setTimeout(() => {
+      if (status.clientIdSet && !status.adminPinSet) {
+        goToSetupStep(3);
+      } else {
+        goToSetupStep(2);
+        loadSetupRedirectUri();
+      }
+    }, 600);
+  }, 800);
+}
+
+function goToSetupStep(n) {
+  // Show/hide steps
+  for (let i = 1; i <= 4; i++) {
+    const el = document.getElementById(`setup-step-${i}`);
+    if (el) el.hidden = (i !== n);
+  }
+
+  // Update progress dots (fill up to step n-1 since step 1 is auto)
+  document.querySelectorAll('.setup-dot').forEach((dot) => {
+    const dotStep = parseInt(dot.dataset.step, 10);
+    dot.classList.toggle('active', dotStep <= Math.max(n - 1, 1));
+  });
+
+  const nextBtn = document.getElementById('setup-next-btn');
+
+  if (n === 1) {
+    nextBtn.hidden   = true;
+    nextBtn.disabled = true;
+  } else if (n === 2) {
+    nextBtn.hidden   = false;
+    nextBtn.disabled = true;
+    nextBtn.textContent = 'Continue';
+    const clientInput = document.getElementById('setup-client-id');
+    clientInput.addEventListener('input', () => {
+      nextBtn.disabled = !clientInput.value.trim();
+    });
+    // Focus the input
+    setTimeout(() => clientInput.focus(), 60);
+  } else if (n === 3) {
+    nextBtn.hidden   = false;
+    nextBtn.disabled = true;
+    nextBtn.textContent = 'Continue';
+    setTimeout(() => document.querySelector('.setup-pin-digit')?.focus(), 60);
+  } else if (n === 4) {
+    nextBtn.hidden   = false;
+    nextBtn.disabled = false;
+    nextBtn.textContent = 'Get started';
+  }
+}
+
+async function loadSetupRedirectUri() {
+  try {
+    const res  = await fetch(`${BASE_URL}/api/setup/redirect-uri`);
+    const data = await res.json();
+    document.getElementById('setup-redirect-uri').textContent = data.redirectUri ?? '';
+  } catch {
+    document.getElementById('setup-redirect-uri').textContent = `${window.location.origin}/api/auth/callback`;
+  }
+}
+
+function handleSetupCopy() {
+  const uri = document.getElementById('setup-redirect-uri').textContent;
+  if (!uri || uri === 'Loading…') return;
+  navigator.clipboard.writeText(uri).then(() => {
+    const btn = document.getElementById('setup-copy-uri');
+    btn.textContent = 'Copied!';
+    setTimeout(() => { btn.textContent = 'Copy'; }, 2000);
+  }).catch(() => {});
+}
+
+async function handleSetupNext() {
+  const nextBtn = document.getElementById('setup-next-btn');
+
+  // Determine current step from which step is visible
+  let currentStep = 2;
+  for (let i = 2; i <= 4; i++) {
+    const el = document.getElementById(`setup-step-${i}`);
+    if (el && !el.hidden) { currentStep = i; break; }
+  }
+
+  if (currentStep === 2) {
+    const clientId = document.getElementById('setup-client-id').value.trim();
+    const errEl    = document.getElementById('setup-client-error');
+    if (!clientId) return;
+
+    nextBtn.disabled    = true;
+    nextBtn.textContent = 'Saving…';
+    errEl.textContent   = '';
+
+    try {
+      const res = await fetch(`${BASE_URL}/api/setup/tidal-client-id`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ clientId }),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        throw new Error(d.error ?? `HTTP ${res.status}`);
+      }
+      goToSetupStep(3);
+    } catch (err) {
+      errEl.textContent   = err.message;
+      nextBtn.disabled    = false;
+      nextBtn.textContent = 'Continue';
+    }
+
+  } else if (currentStep === 3) {
+    const pin   = getSetupPinValue();
+    const errEl = document.getElementById('setup-pin-error');
+    if (pin.length !== 4) return;
+
+    nextBtn.disabled    = true;
+    nextBtn.textContent = 'Saving…';
+    errEl.textContent   = '';
+
+    try {
+      const res = await fetch(`${BASE_URL}/api/admin/setup`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ pin }),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        throw new Error(d.error ?? `HTTP ${res.status}`);
+      }
+      goToSetupStep(4);
+    } catch (err) {
+      errEl.textContent   = err.message;
+      nextBtn.disabled    = false;
+      nextBtn.textContent = 'Continue';
+    }
+
+  } else if (currentStep === 4) {
+    // Remove overlay and start normal app
+    document.getElementById('setup-overlay').remove();
+    await checkAuth();
+  }
+}
+
+function getSetupPinValue() {
+  return [...document.querySelectorAll('.setup-pin-digit')].map((el) => el.value).join('');
+}
+
+function initSetupPinInputs() {
+  const digits  = [...document.querySelectorAll('.setup-pin-digit')];
+  const nextBtn = document.getElementById('setup-next-btn');
+
+  digits.forEach((input, i) => {
+    input.addEventListener('input', () => {
+      input.value = input.value.replace(/\D/g, '').slice(-1);
+      if (input.value && i < digits.length - 1) digits[i + 1].focus();
+      nextBtn.disabled = getSetupPinValue().length !== 4;
+    });
+
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Backspace' && !input.value && i > 0) {
+        digits[i - 1].focus();
+      }
+      if (e.key === 'Enter' && !nextBtn.disabled) nextBtn.click();
+    });
+
+    input.addEventListener('focus', () => input.select());
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Auth
@@ -251,7 +455,7 @@ function openPinModal(pinSet) {
   submitBtn.dataset.pinSet = pinSet ? '1' : '0';
 
   // Clear inputs
-  document.querySelectorAll('.pin-digit').forEach((el) => { el.value = ''; });
+  document.querySelectorAll('#pin-inputs .pin-digit').forEach((el) => { el.value = ''; });
 
   openModal('pin-modal');
 
@@ -260,12 +464,12 @@ function openPinModal(pinSet) {
 }
 
 function getPinValue() {
-  return [...document.querySelectorAll('.pin-digit')].map((el) => el.value).join('');
+  return [...document.querySelectorAll('#pin-inputs .pin-digit')].map((el) => el.value).join('');
 }
 
-// Wire up PIN digit inputs (called once on DOMContentLoaded)
+// Wire up PIN digit inputs for the admin PIN modal (called once on DOMContentLoaded)
 function initPinInputs() {
-  const digits  = [...document.querySelectorAll('.pin-digit')];
+  const digits  = [...document.querySelectorAll('#pin-inputs .pin-digit')];
   const submitBtn = document.getElementById('pin-submit-btn');
 
   digits.forEach((input, i) => {
@@ -313,9 +517,9 @@ async function handlePinSubmit() {
       errEl.textContent = data.error ?? 'Incorrect PIN';
       errEl.hidden      = false;
       // Clear inputs and refocus
-      document.querySelectorAll('.pin-digit').forEach((el) => { el.value = ''; });
+      document.querySelectorAll('#pin-inputs .pin-digit').forEach((el) => { el.value = ''; });
       submitBtn.disabled = true;
-      document.querySelector('.pin-digit')?.focus();
+      document.querySelector('#pin-inputs .pin-digit')?.focus();
       return;
     }
 
