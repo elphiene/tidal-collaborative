@@ -46,13 +46,13 @@ Server (Docker / home lab)
 
 ## Tidal developer app setup
 
-Before running the server you need a free Tidal developer app:
+You need a free Tidal developer application to enable sign-in. The setup wizard walks you through this — it shows the exact Redirect URI for your server and prompts you for the Client ID. You only need to:
 
 1. Go to [developer.tidal.com](https://developer.tidal.com) and create an application
-2. Add the following **Redirect URIs**:
-   - `http://localhost:3000/api/auth/callback`
-   - `http://<your-server-ip>:3000/api/auth/callback`
-3. Copy the **Client ID** — it goes in `server/src/tidal.js` as `TIDAL_CLIENT_ID`
+2. Add the Redirect URI shown by the wizard
+3. Paste the **Client ID** into the wizard
+
+No manual config file editing required.
 
 ---
 
@@ -64,16 +64,10 @@ Before running the server you need a free Tidal developer app:
 # 1. Download the compose file
 curl -O https://raw.githubusercontent.com/elphiene/tidal-collaborative/main/docker/docker-compose.yml
 
-# 2. Generate secrets (run each once, copy the output)
-node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"  # ENCRYPTION_KEY
-node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"  # SESSION_SECRET
-
-# 3. Paste the values into docker-compose.yml:
-#    ENCRYPTION_KEY=<64-char hex>
-#    SESSION_SECRET=<64-char hex>
-
-# 4. Pull image and start
+# 2. Start the container (no secrets needed — generated automatically)
 docker compose up -d
+
+# 3. Open http://localhost:3000 — the setup wizard guides the rest
 ```
 
 ### Option B — Self-build from source
@@ -83,21 +77,17 @@ docker compose up -d
 git clone https://github.com/elphiene/tidal-collaborative.git
 cd tidal-collaborative/docker
 
-# 2. Generate secrets (run each once, copy the output)
-node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"  # ENCRYPTION_KEY
-node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"  # SESSION_SECRET
-
-# 3. Paste the values into docker-compose.yml:
-#    ENCRYPTION_KEY=<64-char hex>
-#    SESSION_SECRET=<64-char hex>
-
-# 4. Make scripts executable, build, and start
+# 2. Build and start
 chmod +x build.sh run.sh publish.sh
 ./build.sh
 ./run.sh
+
+# 3. Open http://localhost:3000 — the setup wizard guides the rest
 ```
 
-Open `http://<your-server-ip>:3000` in any browser and sign in with Tidal.
+The setup wizard handles all first-time configuration in the browser:
+encryption keys and session secrets are generated automatically, and you'll
+be guided through connecting your Tidal developer app and setting an admin PIN.
 
 > Full CasaOS deployment guide: **[docs/CASAOS_DEPLOY.md](docs/CASAOS_DEPLOY.md)**
 
@@ -108,15 +98,10 @@ Open `http://<your-server-ip>:3000` in any browser and sign in with Tidal.
 ```bash
 cd server
 npm install
-cp .env.example .env   # fill in ENCRYPTION_KEY and SESSION_SECRET
 npm start              # http://localhost:3000
 ```
 
-Generate the secrets:
-
-```bash
-node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
-```
+Secrets are auto-generated on first run and stored in the SQLite database. You can optionally set them via environment variables in `server/.env` for deterministic local development.
 
 ---
 
@@ -161,6 +146,9 @@ tidal-collaborative/
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
 | `GET` | `/api/ping` | — | Health check |
+| `GET` | `/api/setup/status` | — | Setup completion status |
+| `POST` | `/api/setup/tidal-client-id` | — | Save Tidal Client ID |
+| `GET` | `/api/setup/redirect-uri` | — | Compute OAuth redirect URI |
 | `GET` | `/api/auth/start` | — | Begin OAuth flow → returns `authUrl` |
 | `GET` | `/api/auth/callback` | — | OAuth redirect handler |
 | `POST` | `/api/auth/logout` | session | Sign out |
@@ -188,10 +176,11 @@ tidal-collaborative/
 |----------|---------|-------------|
 | `PORT` | `3000` | HTTP/WS listen port |
 | `DB_PATH` | `./data/db.sqlite` | SQLite file path |
-| `ENCRYPTION_KEY` | — | **Required.** 64 hex chars (32 bytes). Encrypts stored Tidal tokens. |
-| `SESSION_SECRET` | — | **Required** in production. Signs session cookies. |
+| `ENCRYPTION_KEY` | *(auto-generated)* | 64 hex chars. Encrypts stored Tidal tokens. If set in env, takes precedence over DB value. |
+| `SESSION_SECRET` | *(auto-generated)* | Signs session cookies. If set in env, takes precedence over DB value. |
+| `TIDAL_CLIENT_ID` | *(set via wizard)* | Tidal OAuth Client ID. If set in env, takes precedence over wizard value. |
 
-Set these in `server/.env` (development) or `docker-compose.yml` (Docker).
+Secrets are auto-generated on first run and stored in the database. Setting env vars overrides DB values (for existing deployments or advanced use).
 
 ---
 

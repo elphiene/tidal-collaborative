@@ -7,7 +7,14 @@
 
 const TIDAL_API_BASE   = 'https://openapi.tidal.com/v2';
 const TIDAL_AUTH_TOKEN = 'https://auth.tidal.com/v1/oauth2/token';
-const TIDAL_CLIENT_ID  = 'nvP3dhY139D65vKv';
+
+const db = require('./db');
+
+function getClientId() {
+  const id = process.env.TIDAL_CLIENT_ID || db.getSetting('tidal_client_id');
+  if (!id) throw new Error('Tidal Client ID not configured — complete setup wizard at http://localhost:3000');
+  return id;
+}
 
 // ---------------------------------------------------------------------------
 // Core fetch wrapper
@@ -70,7 +77,7 @@ async function exchangeCode(code, codeVerifier, redirectUri) {
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
       grant_type:    'authorization_code',
-      client_id:     TIDAL_CLIENT_ID,
+      client_id:     getClientId(),
       code,
       redirect_uri:  redirectUri,
       code_verifier: codeVerifier,
@@ -97,7 +104,7 @@ async function refreshTokens(refreshToken) {
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
       grant_type:    'refresh_token',
-      client_id:     TIDAL_CLIENT_ID,
+      client_id:     getClientId(),
       refresh_token: refreshToken,
     }),
   });
@@ -261,7 +268,7 @@ function generateState() {
 function buildAuthUrl(redirectUri, codeChallenge, state, scopes = 'user.read playlists.read playlists.write') {
   const params = new URLSearchParams({
     response_type:         'code',
-    client_id:             TIDAL_CLIENT_ID,
+    client_id:             getClientId(),
     redirect_uri:          redirectUri,
     scope:                 scopes,
     code_challenge:        codeChallenge,

@@ -4,12 +4,39 @@ const express = require('express');
 const cors    = require('cors');
 const path    = require('path');
 const session = require('express-session');
+const crypto  = require('crypto');
 
 const db     = require('./db');
 const config = require('./config');
-const api                        = require('./routes/api');
+
+// ---------------------------------------------------------------------------
+// Startup — DB must init first so we can load/generate secrets
+// ---------------------------------------------------------------------------
+
+db.init();
+
+// ENCRYPTION_KEY: env var → DB → generate new
+let encKey = process.env.ENCRYPTION_KEY || db.getSetting('encryption_key');
+if (!encKey) {
+  encKey = crypto.randomBytes(32).toString('hex');
+  db.setSetting('encryption_key', encKey);
+  console.log('[server] Generated new ENCRYPTION_KEY (stored in DB)');
+}
+process.env.ENCRYPTION_KEY = encKey; // crypto.js reads from process.env
+
+// SESSION_SECRET: env var → DB → generate new
+let sessSecret = process.env.SESSION_SECRET || db.getSetting('session_secret');
+if (!sessSecret || sessSecret === 'dev-secret-change-in-production') {
+  sessSecret = crypto.randomBytes(32).toString('hex');
+  db.setSetting('session_secret', sessSecret);
+  console.log('[server] Generated new SESSION_SECRET (stored in DB)');
+}
+
+// Routes are loaded after secrets are set so any module-level logic
+// that depends on process.env runs with the correct values.
+const api                          = require('./routes/api');
 const { initWebSocket, broadcast } = require('./routes/ws');
-const { startPoller }            = require('./poller');
+const { startPoller }              = require('./poller');
 
 // ---------------------------------------------------------------------------
 // App
@@ -19,7 +46,7 @@ const app = express();
 
 // Session middleware — must come before routes
 const sessionParser = session({
-  secret:            config.SESSION_SECRET,
+  secret:            sessSecret,
   resave:            false,
   saveUninitialized: false,
   cookie: {
@@ -49,8 +76,6 @@ app.get('*', (_req, res) => {
 // Startup
 // ---------------------------------------------------------------------------
 
-db.init();
-
 const server = app.listen(config.PORT, '0.0.0.0', () => {
   console.log(
     `[server] listening on http://0.0.0.0:${config.PORT}  (${config.NODE_ENV})`,
@@ -60,12 +85,8 @@ const server = app.listen(config.PORT, '0.0.0.0', () => {
 // Wire session to WebSocket upgrade so req.session is available on WS connections
 const wss = initWebSocket(server, sessionParser);
 
-// Start server-side Tidal polling (replaces extension alarms)
-if (config.ENCRYPTION_KEY) {
-  startPoller(broadcast);
-} else {
-  console.warn('[server] ENCRYPTION_KEY not set — poller disabled (tokens cannot be decrypted)');
-}
+// Start server-side Tidal polling — encryption key is always set at this point
+startPoller(broadcast);
 
 // ---------------------------------------------------------------------------
 // Graceful shutdown

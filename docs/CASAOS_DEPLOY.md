@@ -1,6 +1,6 @@
 # Deploying to CasaOS
 
-This guide walks through installing **Tidal Collaborative** via the CasaOS web UI. No cloning or building required — the image is pulled directly from Docker Hub.
+This guide walks through installing **Tidal Collaborative** via the CasaOS web UI. No cloning, building, or terminal access required — the image is pulled directly from Docker Hub and a setup wizard handles all configuration in the browser.
 
 ---
 
@@ -13,42 +13,14 @@ This guide walks through installing **Tidal Collaborative** via the CasaOS web U
 | Free RAM | ≥ 128 MB | — |
 | Free disk | ≥ 100 MB | — |
 
-Node.js is only needed to generate secrets. You can run the commands below on any machine that has it — your laptop, a phone terminal app, etc.
-
 ---
 
-## Before you start — Tidal developer app
-
-You need a free Tidal developer application:
-
-1. Go to [developer.tidal.com](https://developer.tidal.com) and sign in
-2. Create a new application
-3. Add this **Redirect URI**:
-   - `http://<your-server-ip>:3000/api/auth/callback`
-4. Copy the **Client ID** — you'll need it later
-
----
-
-## Step 1 — Generate secrets
-
-Run the following command **twice** (once for `ENCRYPTION_KEY`, once for `SESSION_SECRET`). This can be done on any machine with Node.js:
-
-```bash
-node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
-```
-
-Save both 64-character hex strings — you'll paste them into the compose config in the next step.
-
-> **Keep these safe.** `ENCRYPTION_KEY` encrypts stored Tidal tokens at rest. If it changes, all users must sign in again.
-
----
-
-## Step 2 — Install via CasaOS UI
+## Step 1 — Install via CasaOS UI
 
 1. Open the CasaOS web UI
 2. Go to **Apps** → **Install a customized app**
 3. Click **Import** (or the compose/YAML tab)
-4. Paste the following, replacing the two placeholder values with your generated secrets:
+4. Paste the following compose config:
 
 ```yaml
 services:
@@ -64,8 +36,6 @@ services:
       - NODE_ENV=production
       - PORT=3000
       - DB_PATH=/app/data/db.sqlite
-      - ENCRYPTION_KEY=<paste-your-first-64-char-hex-here>
-      - SESSION_SECRET=<paste-your-second-64-char-hex-here>
     networks:
       - tidal-network
     healthcheck:
@@ -88,6 +58,27 @@ networks:
 
 ---
 
+## Step 2 — Open the setup wizard
+
+Navigate to `http://<your-server-ip>:3000` in any browser. The setup wizard will guide you through:
+
+1. **Server setup** — encryption keys and session secrets are generated automatically (no terminal needed)
+2. **Connect Tidal** — the wizard shows you the exact Redirect URI to register in the Tidal developer portal, then asks for your Client ID
+3. **Set admin PIN** — choose a 4-digit PIN to protect the admin panel
+
+### Registering a Tidal developer app (step 2 of the wizard)
+
+You need a free Tidal developer application:
+
+1. Go to [developer.tidal.com](https://developer.tidal.com) and sign in (or create an account)
+2. Create a new application
+3. Copy the **Redirect URI** shown in the wizard and add it exactly as-is to your app
+4. Copy the **Client ID** and paste it into the wizard
+
+> The wizard shows you the exact Redirect URI for your server — no guessing required.
+
+---
+
 ## Step 3 — Verify
 
 ```bash
@@ -95,21 +86,24 @@ curl http://<your-server-ip>:3000/api/ping
 # → {"ok":true,"ts":...}
 ```
 
-Then open `http://<your-server-ip>:3000` in any browser, click **Sign in with Tidal**, and complete the OAuth flow.
+Then open `http://<your-server-ip>:3000` in any browser and click **Sign in with Tidal**.
 
 ---
 
 ## Configuration
 
-All configuration lives in the environment block of the compose above:
+All configuration is handled via the setup wizard on first run. The data volume at `/DATA/AppData/tidal-collaborative/` stores the SQLite database which includes all settings (including the auto-generated secrets).
+
+Optional environment variables (override wizard-set values for advanced use):
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PORT` | `3000` | HTTP/WS listen port |
 | `NODE_ENV` | `production` | Runtime mode |
 | `DB_PATH` | `/app/data/db.sqlite` | SQLite path inside the container |
-| `ENCRYPTION_KEY` | — | **Required.** 64 hex chars. Encrypts stored Tidal tokens. |
-| `SESSION_SECRET` | — | **Required.** Signs session cookies. Any long random string. |
+| `ENCRYPTION_KEY` | *(auto-generated)* | 64 hex chars. Encrypts stored Tidal tokens. |
+| `SESSION_SECRET` | *(auto-generated)* | Signs session cookies. |
+| `TIDAL_CLIENT_ID` | *(set via wizard)* | Tidal OAuth Client ID. |
 
 To change the host port, edit the `ports:` line before submitting (or update the app in CasaOS):
 ```yaml
@@ -123,7 +117,7 @@ ports:
 
 The admin panel is at `http://<your-server-ip>:3000` under the **Admin** tab.
 
-The first user to click **Admin** sets a 4-digit PIN. After that, the PIN is required to access admin features (create/delete shared playlists, view all users).
+The 4-digit PIN is set during the setup wizard. After that, the PIN is required to access admin features (create/delete shared playlists, view all users).
 
 ---
 
@@ -153,13 +147,13 @@ docker pull elphiene/tidal-collaborative:latest
 docker compose -p tidal-collaborative up -d
 ```
 
-The SQLite database in `/DATA/AppData/tidal-collaborative/` is a bind-mounted volume and is never touched by image updates.
+The SQLite database in `/DATA/AppData/tidal-collaborative/` is a bind-mounted volume and is never touched by image updates. All settings (including secrets and Tidal Client ID) persist across updates.
 
 ---
 
 ## Backing up the database
 
-The entire state is one file:
+The entire state (including secrets and configuration) is one file:
 
 ```bash
 cp /DATA/AppData/tidal-collaborative/db.sqlite \
@@ -175,7 +169,8 @@ docker start tidal-collaborative
 ```
 
 > After restoring a backup, all users will need to sign in again only if the
-> `ENCRYPTION_KEY` is different from when the backup was made.
+> `ENCRYPTION_KEY` is different from when the backup was made. Since keys are
+> stored in the database, restoring the same backup restores the same key.
 
 ---
 
@@ -205,18 +200,28 @@ docker logs tidal-collaborative
 ```
 
 Common causes:
-- **`ENCRYPTION_KEY` not set or wrong length** — must be exactly 64 hex characters
 - **Port 3000 already in use** — change the host port in the compose config
 - **Permission error on data dir** — `chmod 777 /DATA/AppData/tidal-collaborative/` then restart
 
 ### Sign-in fails with "invalid_state" or "11102"
 
-- Confirm the redirect URI registered in [developer.tidal.com](https://developer.tidal.com) exactly matches `http://<your-server-ip>:3000/api/auth/callback`
+- Confirm the redirect URI registered in [developer.tidal.com](https://developer.tidal.com) exactly matches the one shown in the setup wizard
 - Check for trailing slashes or `https` vs `http` mismatches
 
 ### Users signed out after restart
 
-If the `ENCRYPTION_KEY` changed (or was not set) since users last signed in, their stored tokens are unreadable and they must sign in again. Keep the key stable across restarts.
+This happens only if the `ENCRYPTION_KEY` changed since users last signed in. In normal operation, the key is stored in the database and persists across restarts — so this should not happen unless the data volume was lost or replaced.
+
+### Need to re-run the setup wizard
+
+If you need to reconfigure (e.g. change the Tidal Client ID), you can reset setup state via the database:
+
+```bash
+docker exec -it tidal-collaborative sh
+sqlite3 /app/data/db.sqlite "DELETE FROM settings WHERE key IN ('tidal_client_id', 'admin_pin');"
+```
+
+Then refresh the app in the browser — the wizard will reappear.
 
 ### Health check failing
 

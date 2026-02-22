@@ -332,6 +332,38 @@ router.get('/shared-playlists/:id/linked-users', (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// Setup wizard
+// ---------------------------------------------------------------------------
+
+// GET /api/setup/status
+router.get('/setup/status', (_req, res) => {
+  const clientIdSet = !!(process.env.TIDAL_CLIENT_ID || db.getSetting('tidal_client_id'));
+  const adminPinSet = !!db.getSetting('admin_pin');
+  res.json({
+    complete: clientIdSet && adminPinSet,
+    clientIdSet,
+    adminPinSet,
+  });
+});
+
+// POST /api/setup/tidal-client-id
+router.post('/setup/tidal-client-id', (req, res) => {
+  const clientId = String(req.body?.clientId ?? '').trim();
+  if (!clientId) return res.status(400).json({ error: 'clientId is required' });
+  db.setSetting('tidal_client_id', clientId);
+  console.log('[api] Tidal Client ID saved via setup wizard');
+  res.json({ ok: true });
+});
+
+// GET /api/setup/redirect-uri
+router.get('/setup/redirect-uri', (req, res) => {
+  const proto       = req.headers['x-forwarded-proto'] ?? req.protocol;
+  const host        = req.headers['x-forwarded-host'] ?? req.headers.host;
+  const redirectUri = `${proto}://${host}/api/auth/callback`;
+  res.json({ redirectUri });
+});
+
+// ---------------------------------------------------------------------------
 // Users (presence)
 // ---------------------------------------------------------------------------
 

@@ -8,6 +8,74 @@
 </head>
 <body>
 
+<!-- ===================== SETUP WIZARD ===================== -->
+<div id="setup-overlay" hidden>
+  <div class="setup-card">
+    <div class="setup-progress">
+      <span class="setup-dot active" data-step="1"></span>
+      <span class="setup-dot" data-step="2"></span>
+      <span class="setup-dot" data-step="3"></span>
+    </div>
+
+    <!-- Step 1: Auto-setup -->
+    <div id="setup-step-1" class="setup-step">
+      <div class="setup-icon">⚙️</div>
+      <h2>Setting up your server…</h2>
+      <p>Generating encryption keys and session secrets.</p>
+      <div id="setup-step-1-status" class="setup-loading"><div class="spinner"></div></div>
+    </div>
+
+    <!-- Step 2: Tidal developer setup -->
+    <div id="setup-step-2" class="setup-step" hidden>
+      <div class="setup-icon">🎵</div>
+      <h2>Connect Tidal</h2>
+      <p>You need a free Tidal developer app to enable sign-in.</p>
+      <ol class="setup-instructions">
+        <li>Go to <a href="https://developer.tidal.com" target="_blank" rel="noopener">developer.tidal.com</a> and create an account</li>
+        <li>Create a new application</li>
+        <li>Add this exact <strong>Redirect URI</strong>:</li>
+      </ol>
+      <div class="setup-copy-box">
+        <code id="setup-redirect-uri">Loading…</code>
+        <button class="btn-copy" id="setup-copy-uri">Copy</button>
+      </div>
+      <div class="form-group" style="margin-top:1.5rem">
+        <label class="form-label" for="setup-client-id">
+          Client ID <span class="required">*</span>
+        </label>
+        <input class="form-input" id="setup-client-id"
+               type="text" placeholder="Paste your Tidal Client ID here" autocomplete="off" />
+        <p class="form-error" id="setup-client-error"></p>
+      </div>
+    </div>
+
+    <!-- Step 3: Admin PIN -->
+    <div id="setup-step-3" class="setup-step" hidden>
+      <div class="setup-icon">🔒</div>
+      <h2>Set Admin PIN</h2>
+      <p>Choose a 4-digit PIN to protect the admin panel.</p>
+      <div class="pin-inputs" id="setup-pin-inputs">
+        <input class="pin-digit setup-pin-digit" type="password" inputmode="numeric" maxlength="1" autocomplete="off">
+        <input class="pin-digit setup-pin-digit" type="password" inputmode="numeric" maxlength="1" autocomplete="off">
+        <input class="pin-digit setup-pin-digit" type="password" inputmode="numeric" maxlength="1" autocomplete="off">
+        <input class="pin-digit setup-pin-digit" type="password" inputmode="numeric" maxlength="1" autocomplete="off">
+      </div>
+      <p class="form-error" id="setup-pin-error"></p>
+    </div>
+
+    <!-- Step 4: Done -->
+    <div id="setup-step-4" class="setup-step" hidden>
+      <div class="setup-icon setup-success-icon">✓</div>
+      <h2>You're all set!</h2>
+      <p>Tidal Collaborative is ready. Sign in with your Tidal account to get started.</p>
+    </div>
+
+    <div class="setup-footer">
+      <button class="btn btn-primary" id="setup-next-btn" disabled hidden>Continue</button>
+    </div>
+  </div>
+</div>
+
 <!-- ===================== HEADER ===================== -->
 <header class="header">
   <div class="header-left">
