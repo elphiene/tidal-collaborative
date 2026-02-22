@@ -16,11 +16,27 @@ const clients = new Map();
 
 /**
  * Attach a WebSocket server to an existing HTTP server on the /ws path.
+ * Accepts sessionParser so req.session is populated on upgrade.
  * @param {import('http').Server} httpServer
+ * @param {Function} sessionParser  express-session middleware
  * @returns {WebSocketServer}
  */
-function initWebSocket(httpServer) {
-  const wss = new WebSocketServer({ server: httpServer, path: '/ws' });
+function initWebSocket(httpServer, sessionParser) {
+  // Create without `server` so we can handle the upgrade manually (to inject session)
+  const wss = new WebSocketServer({ noServer: true, path: '/ws' });
+
+  httpServer.on('upgrade', (req, socket, head) => {
+    if (req.url !== '/ws') {
+      socket.destroy();
+      return;
+    }
+    // Run session middleware on the upgrade request so req.session is populated
+    sessionParser(req, {}, () => {
+      wss.handleUpgrade(req, socket, head, (ws) => {
+        wss.emit('connection', ws, req);
+      });
+    });
+  });
 
   wss.on('listening', () => {
     console.log('[ws] listening on /ws');
@@ -30,15 +46,41 @@ function initWebSocket(httpServer) {
     const ip = req.socket.remoteAddress ?? 'unknown';
     console.log(`[ws] new connection from ${ip}`);
 
-    ws.isAuthenticated = false;
-    ws.userId = null;
+    // Auth via session (sessionParser runs before handleUpgrade in index.js)
+    const sessionUserId = req.session?.userId ?? null;
+    ws.userId          = sessionUserId;
+    ws.isAuthenticated = !!sessionUserId;
+
+    if (ws.userId) {
+      // Close any pre-existing connection for this user
+      const existing = clients.get(ws.userId);
+      if (existing && existing !== ws && existing.readyState === existing.OPEN) {
+        console.log(`[ws] replacing stale connection for user ${ws.userId}`);
+        existing.close(1000, 'Replaced by newer connection');
+      }
+
+      clients.set(ws.userId, ws);
+
+      // Update presence for all linked playlists
+      try {
+        const links = db.getUserLinks(ws.userId);
+        for (const link of links) {
+          db.updateUserLastSeen(ws.userId, link.shared_playlist_id);
+        }
+      } catch (err) {
+        console.warn(`[ws] presence update failed for ${ws.userId}: ${err.message}`);
+      }
+
+      console.log(`[ws] user ${ws.userId} connected via session (${clients.size} online)`);
+      send(ws, { type: 'auth_ok', user_id: ws.userId, ts: Date.now() });
+    } else {
+      console.log(`[ws] unauthenticated connection from ${ip} (no session)`);
+    }
 
     ws.on('message', (raw) => handleMessage(ws, raw));
 
     ws.on('close', (code) => {
       if (ws.userId) {
-        // Only remove this socket if it's still the current one for this user
-        // (a newer connection may have already replaced it)
         if (clients.get(ws.userId) === ws) {
           clients.delete(ws.userId);
         }
@@ -358,4 +400,4 @@ function broadcast(sharedPlaylistId, message, excludeUserId) {
   );
 }
 
-module.exports = { initWebSocket, clients };
+module.exports = { initWebSocket, clients, broadcast };

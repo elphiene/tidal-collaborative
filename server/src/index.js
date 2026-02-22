@@ -3,10 +3,13 @@
 const express = require('express');
 const cors    = require('cors');
 const path    = require('path');
-const db      = require('./db');
-const config  = require('./config');
-const api                  = require('./routes/api');
-const { initWebSocket }    = require('./routes/ws');
+const session = require('express-session');
+
+const db     = require('./db');
+const config = require('./config');
+const api                        = require('./routes/api');
+const { initWebSocket, broadcast } = require('./routes/ws');
+const { startPoller }            = require('./poller');
 
 // ---------------------------------------------------------------------------
 // App
@@ -14,15 +17,28 @@ const { initWebSocket }    = require('./routes/ws');
 
 const app = express();
 
+// Session middleware — must come before routes
+const sessionParser = session({
+  secret:            config.SESSION_SECRET,
+  resave:            false,
+  saveUninitialized: false,
+  cookie: {
+    httpOnly: true,
+    maxAge:   30 * 24 * 60 * 60 * 1000, // 30 days
+    // sameSite: 'lax' is the default; set secure: true if using HTTPS
+  },
+});
+
+app.use(sessionParser);
 app.use(cors());
 app.use(express.json());
+
+// REST API (must come before static files so /api routes are not shadowed)
+app.use('/api', api);
 
 // Serve web UI as static files
 const webUiDir = path.join(__dirname, '../../web-ui');
 app.use(express.static(webUiDir));
-
-// REST API
-app.use('/api', api);
 
 // SPA fallback — serve index.html for any non-API route
 app.get('*', (_req, res) => {
@@ -41,7 +57,15 @@ const server = app.listen(config.PORT, '0.0.0.0', () => {
   );
 });
 
-const wss = initWebSocket(server);
+// Wire session to WebSocket upgrade so req.session is available on WS connections
+const wss = initWebSocket(server, sessionParser);
+
+// Start server-side Tidal polling (replaces extension alarms)
+if (config.ENCRYPTION_KEY) {
+  startPoller(broadcast);
+} else {
+  console.warn('[server] ENCRYPTION_KEY not set — poller disabled (tokens cannot be decrypted)');
+}
 
 // ---------------------------------------------------------------------------
 // Graceful shutdown
@@ -49,7 +73,6 @@ const wss = initWebSocket(server);
 
 function shutdown(signal) {
   console.log(`[server] ${signal} — shutting down…`);
-  // Close WebSocket server first (stops accepting new connections)
   wss.close(() => {
     server.close(() => {
       db.close();
@@ -57,7 +80,6 @@ function shutdown(signal) {
     });
   });
 
-  // Force-exit if clients don't disconnect within 5 s
   setTimeout(() => process.exit(1), 5_000).unref();
 }
 

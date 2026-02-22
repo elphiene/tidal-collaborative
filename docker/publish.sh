@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-# build.sh — Build the Tidal Collaborative Docker image
+# publish.sh — Build multi-platform image and push to Docker Hub
 #
-# Usage:  ./build.sh [--no-cache]
+# Requires: docker buildx (included in Docker Desktop and Engine 19.03+)
+# Usage:    ./publish.sh
 #
-# Run from the docker/ directory:
-#   cd docker && ./build.sh
+# One-time builder setup (run once per machine):
+#   docker buildx create --name mybuilder --use
+#   docker buildx inspect --bootstrap
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -13,23 +15,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 VERSION="$(date +%Y%m%d-%H%M)"
 IMAGE="elphiene/tidal-collaborative"
-NO_CACHE=""
-
-# ── Parse args ───────────────────────────────────────────────────────────────
-for arg in "$@"; do
-  case "$arg" in
-    --no-cache) NO_CACHE="--no-cache" ;;
-    *) echo "Unknown argument: $arg" && exit 1 ;;
-  esac
-done
 
 echo "╔══════════════════════════════════════════╗"
-echo "║  Tidal Collaborative — Docker Build      ║"
+echo "║  Tidal Collaborative — Multi-platform    ║"
+echo "║  Docker Hub Publish                      ║"
 echo "╚══════════════════════════════════════════╝"
 echo ""
-echo "  Project root : $PROJECT_ROOT"
-echo "  Build tag    : $IMAGE:$VERSION"
-echo "  No-cache     : ${NO_CACHE:-off}"
+echo "  Image     : $IMAGE"
+echo "  Tags      : latest, $VERSION"
+echo "  Platforms : linux/amd64, linux/arm64"
 echo ""
 
 # ── Sanity checks ────────────────────────────────────────────────────────────
@@ -41,25 +35,24 @@ if ! docker info &>/dev/null; then
   echo "✗ Docker daemon not running — start it first." && exit 1
 fi
 
-# ── Build ────────────────────────────────────────────────────────────────────
-cd "$SCRIPT_DIR"
+if ! docker buildx version &>/dev/null; then
+  echo "✗ docker buildx not available — upgrade to Docker Engine 19.03+." && exit 1
+fi
 
-echo "→ Building image…"
-docker compose -f docker-compose.yml -f docker-compose.build.yml build $NO_CACHE
+# ── Build + push ─────────────────────────────────────────────────────────────
+echo "→ Building $IMAGE:latest and $IMAGE:$VERSION"
+echo "  Platforms: linux/amd64, linux/arm64"
+echo ""
 
-# Tag with a timestamped version for easy rollback
-docker tag "$IMAGE:latest" "$IMAGE:$VERSION"
+docker buildx build \
+  --platform linux/amd64,linux/arm64 \
+  --file "$SCRIPT_DIR/Dockerfile" \
+  --tag "$IMAGE:latest" \
+  --tag "$IMAGE:$VERSION" \
+  --push \
+  "$PROJECT_ROOT"
 
 echo ""
-echo "→ Pushing to Docker Hub…"
-docker push "$IMAGE:latest"
-docker push "$IMAGE:$VERSION"
-
+echo "✓ Published $IMAGE:latest  ($IMAGE:$VERSION)"
 echo ""
-echo "✓ Build and push complete!"
-echo ""
-echo "  Images:"
-docker images "$IMAGE" --format "  {{.Repository}}:{{.Tag}}  ({{.Size}})"
-echo ""
-echo "  Next step:"
-echo "    cd docker && ./run.sh"
+echo "  Verify at: https://hub.docker.com/r/$IMAGE"

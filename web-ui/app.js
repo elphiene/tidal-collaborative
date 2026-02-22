@@ -13,28 +13,74 @@ const POLL_MS  = 6_000;
 // ---------------------------------------------------------------------------
 
 const state = {
-  playlists:   [],
-  users:       [],
-  ws:          null,
-  wsConnected: false,
-  pollTimer:   null,
+  // Auth
+  userId:       null,
+  displayName:  null,
+  signedIn:     false,
+
+  // Current view: 'signed-out' | 'my-playlists' | 'admin'
+  view: 'signed-out',
+
+  // Admin data
+  playlists: [],
+  users:     [],
+
+  // My links
+  myLinks: [],
+
+  // Link modal state
+  selectedTidalPlaylist: null, // { id, name }
+  selectedSharedPlaylist: null, // { id, name }
+
+  // WS
+  ws:                 null,
+  wsConnected:        false,
+  wsDisconnectTimer:  null,
+  pollTimer:          null,
 };
 
 // ---------------------------------------------------------------------------
 // Bootstrap
 // ---------------------------------------------------------------------------
 
-document.addEventListener('DOMContentLoaded', () => {
-  document.getElementById('server-url').textContent = window.location.host;
+document.addEventListener('DOMContentLoaded', async () => {
+  // Handle OAuth redirect query params
+  const params = new URLSearchParams(window.location.search);
+  if (params.has('auth')) {
+    const result = params.get('auth');
+    if (result === 'ok') {
+      toast('Signed in successfully!', 'success');
+    } else if (result === 'error') {
+      const reason = params.get('reason') ?? 'Unknown error';
+      toast(`Sign-in failed: ${reason}`, 'error');
+    }
+    // Clean up URL
+    history.replaceState({}, '', '/');
+  }
 
-  // Button listeners
+  // Wire up static event listeners
+  document.getElementById('signin-btn').addEventListener('click', handleSignIn);
+  document.getElementById('signout-btn').addEventListener('click', handleSignOut);
+  document.getElementById('open-link-btn').addEventListener('click', openLinkModal);
   document.getElementById('open-create-btn').addEventListener('click', () => openModal('create-modal'));
   document.getElementById('refresh-btn').addEventListener('click', () => {
-    refresh();
+    refreshAdmin();
     toast('Refreshed', 'info');
   });
 
-  // Form submit
+  // Navigation tabs
+  document.querySelectorAll('.nav-tab').forEach((btn) => {
+    btn.addEventListener('click', () => switchView(btn.dataset.view));
+  });
+
+  // PIN inputs
+  initPinInputs();
+
+  // Link modal controls
+  document.getElementById('link-next-btn').addEventListener('click', handleLinkNext);
+  document.getElementById('link-back-btn').addEventListener('click', handleLinkBack);
+
+  // Create form
   document.getElementById('create-form').addEventListener('submit', handleCreateSubmit);
 
   // Modal close buttons (data-close="<modal-id>")
@@ -55,16 +101,472 @@ document.addEventListener('DOMContentLoaded', () => {
     document.querySelectorAll('.modal-overlay.modal-open').forEach((m) => closeModal(m.id));
   });
 
-  connectWebSocket();
-  refresh();
-  state.pollTimer = setInterval(refresh, POLL_MS);
+  // Check auth state
+  await checkAuth();
 });
 
 // ---------------------------------------------------------------------------
-// Data fetching
+// Auth
 // ---------------------------------------------------------------------------
 
-async function refresh() {
+async function checkAuth() {
+  try {
+    const res = await fetch(`${BASE_URL}/api/me`);
+    if (res.status === 401) {
+      showSignedOut();
+      return;
+    }
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    state.userId      = data.userId;
+    state.displayName = data.displayName;
+    state.signedIn    = true;
+    showSignedIn();
+  } catch (err) {
+    console.error('[app] checkAuth:', err.message);
+    showSignedOut();
+  }
+}
+
+async function handleSignIn() {
+  const btn = document.getElementById('signin-btn');
+  btn.disabled = true;
+  btn.textContent = 'Redirecting…';
+
+  try {
+    const res  = await fetch(`${BASE_URL}/api/auth/start`);
+    const data = await res.json();
+    if (!data.authUrl) throw new Error('No auth URL returned');
+    window.location.href = data.authUrl;
+  } catch (err) {
+    console.error('[app] handleSignIn:', err.message);
+    const errEl = document.getElementById('auth-error');
+    errEl.textContent = `Could not start sign-in: ${err.message}`;
+    errEl.hidden = false;
+    btn.disabled = false;
+    btn.innerHTML = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4M10 17l5-5-5-5M15 12H3"/></svg> Sign in with Tidal`;
+  }
+}
+
+async function handleSignOut() {
+  try {
+    await fetch(`${BASE_URL}/api/auth/logout`, { method: 'POST' });
+  } catch { /* ignore */ }
+  state.userId      = null;
+  state.displayName = null;
+  state.signedIn    = false;
+  if (state.ws) {
+    state.ws.onclose = null;
+    state.ws.close();
+    state.ws = null;
+  }
+  clearInterval(state.pollTimer);
+  showSignedOut();
+}
+
+// ---------------------------------------------------------------------------
+// View management
+// ---------------------------------------------------------------------------
+
+function showSignedOut() {
+  document.getElementById('signed-out-view').hidden   = false;
+  document.getElementById('my-playlists-view').hidden = true;
+  document.getElementById('admin-view').hidden        = true;
+  document.getElementById('nav-tabs').hidden          = true;
+  document.getElementById('user-display').hidden      = true;
+  document.getElementById('signout-btn').hidden       = true;
+  setWsStatus(false);
+}
+
+function showSignedIn() {
+  document.getElementById('signed-out-view').hidden = true;
+  document.getElementById('nav-tabs').hidden        = false;
+  const userDisplay = document.getElementById('user-display');
+  userDisplay.textContent = state.displayName ?? state.userId;
+  userDisplay.hidden      = false;
+  document.getElementById('signout-btn').hidden = false;
+
+  switchView('my-playlists');
+  connectWebSocket();
+  state.pollTimer = setInterval(refreshAdmin, POLL_MS);
+}
+
+async function switchView(viewName) {
+  if (viewName === 'admin') {
+    const ok = await ensureAdminAuthed();
+    if (!ok) return; // PIN modal shown; view switch happens after successful auth
+  }
+
+  state.view = viewName;
+
+  document.querySelectorAll('.nav-tab').forEach((btn) => {
+    btn.classList.toggle('nav-tab-active', btn.dataset.view === viewName);
+  });
+
+  document.getElementById('my-playlists-view').hidden = viewName !== 'my-playlists';
+  document.getElementById('admin-view').hidden        = viewName !== 'admin';
+
+  if (viewName === 'my-playlists') {
+    fetchMyLinks();
+  } else if (viewName === 'admin') {
+    refreshAdmin();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Admin PIN
+// ---------------------------------------------------------------------------
+
+async function ensureAdminAuthed() {
+  try {
+    const res  = await fetch(`${BASE_URL}/api/admin/status`);
+    const data = await res.json();
+    if (data.authed) return true;
+    openPinModal(data.pinSet);
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+function openPinModal(pinSet) {
+  const desc    = document.getElementById('pin-modal-desc');
+  const title   = document.getElementById('pin-modal-title');
+  const submitBtn = document.getElementById('pin-submit-btn');
+  const errEl   = document.getElementById('pin-error');
+
+  if (pinSet) {
+    title.textContent = 'Admin Access';
+    desc.textContent  = 'Enter the 4-digit admin PIN';
+    submitBtn.querySelector('.btn-label').textContent = 'Unlock';
+  } else {
+    title.textContent = 'Set Admin PIN';
+    desc.textContent  = 'Choose a 4-digit PIN to protect the admin panel';
+    submitBtn.querySelector('.btn-label').textContent = 'Set PIN';
+  }
+
+  errEl.hidden      = true;
+  errEl.textContent = '';
+  submitBtn.disabled = true;
+  submitBtn.dataset.pinSet = pinSet ? '1' : '0';
+
+  // Clear inputs
+  document.querySelectorAll('.pin-digit').forEach((el) => { el.value = ''; });
+
+  openModal('pin-modal');
+
+  // Focus first digit after modal opens
+  setTimeout(() => document.querySelector('.pin-digit')?.focus(), 60);
+}
+
+function getPinValue() {
+  return [...document.querySelectorAll('.pin-digit')].map((el) => el.value).join('');
+}
+
+// Wire up PIN digit inputs (called once on DOMContentLoaded)
+function initPinInputs() {
+  const digits  = [...document.querySelectorAll('.pin-digit')];
+  const submitBtn = document.getElementById('pin-submit-btn');
+
+  digits.forEach((input, i) => {
+    input.addEventListener('input', () => {
+      // Only allow single digit
+      input.value = input.value.replace(/\D/g, '').slice(-1);
+      // Auto-advance
+      if (input.value && i < digits.length - 1) digits[i + 1].focus();
+      submitBtn.disabled = getPinValue().length !== 4;
+    });
+
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Backspace' && !input.value && i > 0) {
+        digits[i - 1].focus();
+      }
+      if (e.key === 'Enter' && !submitBtn.disabled) submitBtn.click();
+    });
+
+    // Select on focus so typing replaces the digit
+    input.addEventListener('focus', () => input.select());
+  });
+
+  submitBtn.addEventListener('click', handlePinSubmit);
+}
+
+async function handlePinSubmit() {
+  const pin     = getPinValue();
+  const errEl   = document.getElementById('pin-error');
+  const submitBtn = document.getElementById('pin-submit-btn');
+  const pinSet  = submitBtn.dataset.pinSet === '1';
+  const endpoint = pinSet ? '/api/admin/auth' : '/api/admin/setup';
+
+  errEl.hidden = true;
+  setLoadingBtn(submitBtn, true);
+
+  try {
+    const res  = await fetch(`${BASE_URL}${endpoint}`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ pin }),
+    });
+    const data = await res.json();
+
+    if (!res.ok) {
+      errEl.textContent = data.error ?? 'Incorrect PIN';
+      errEl.hidden      = false;
+      // Clear inputs and refocus
+      document.querySelectorAll('.pin-digit').forEach((el) => { el.value = ''; });
+      submitBtn.disabled = true;
+      document.querySelector('.pin-digit')?.focus();
+      return;
+    }
+
+    closeModal('pin-modal');
+    // Now actually switch to admin view
+    state.view = 'admin';
+    document.querySelectorAll('.nav-tab').forEach((btn) => {
+      btn.classList.toggle('nav-tab-active', btn.dataset.view === 'admin');
+    });
+    document.getElementById('my-playlists-view').hidden = true;
+    document.getElementById('admin-view').hidden        = false;
+    refreshAdmin();
+  } catch (err) {
+    errEl.textContent = 'Network error — try again';
+    errEl.hidden      = false;
+  } finally {
+    setLoadingBtn(submitBtn, false);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// My Playlists view
+// ---------------------------------------------------------------------------
+
+async function fetchMyLinks() {
+  try {
+    const res = await fetch(`${BASE_URL}/api/links`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    state.myLinks = await res.json();
+    renderMyLinks();
+  } catch (err) {
+    console.error('[app] fetchMyLinks:', err.message);
+    document.getElementById('my-links-list').innerHTML = `
+      <div class="empty-state">
+        <p class="empty-title">Failed to load links</p>
+        <p class="empty-sub">${escHtml(err.message)}</p>
+      </div>`;
+  }
+}
+
+function renderMyLinks() {
+  const el = document.getElementById('my-links-list');
+
+  if (state.myLinks.length === 0) {
+    el.innerHTML = `
+      <div class="empty-state">
+        <div class="empty-icon">🔗</div>
+        <p class="empty-title">No playlists linked yet</p>
+        <p class="empty-sub">Click <strong>Link Playlist</strong> to connect one of your Tidal playlists to a shared playlist.</p>
+      </div>`;
+    return;
+  }
+
+  el.innerHTML = state.myLinks.map((link) => `
+    <div class="link-card">
+      <div class="link-card-body">
+        <div class="link-arrow">
+          <span class="link-name tidal-name">${escHtml(link.tidal_playlist_name || link.tidal_playlist_id)}</span>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <path d="M5 12h14M12 5l7 7-7 7"/>
+          </svg>
+          <span class="link-name shared-name">${escHtml(link.shared_playlist_name)}</span>
+        </div>
+        <p class="link-meta">Linked ${formatDate(link.created_at)}</p>
+      </div>
+      <div class="link-card-actions">
+        <button class="btn btn-danger btn-sm" data-unlink="${link.id}" data-armed="false">Unlink</button>
+      </div>
+    </div>`).join('');
+
+  el.querySelectorAll('[data-unlink]').forEach((btn) => {
+    btn.addEventListener('click', () => handleUnlink(parseInt(btn.dataset.unlink, 10), btn));
+  });
+}
+
+async function handleUnlink(linkId, btn) {
+  if (btn.dataset.armed !== 'true') {
+    btn.dataset.armed = 'true';
+    btn.textContent   = 'Confirm?';
+    setTimeout(() => {
+      if (btn.dataset.armed === 'true') {
+        btn.dataset.armed = 'false';
+        btn.textContent   = 'Unlink';
+      }
+    }, 3000);
+    return;
+  }
+
+  btn.disabled    = true;
+  btn.textContent = 'Unlinking…';
+
+  try {
+    const res = await fetch(`${BASE_URL}/api/links/${linkId}`, { method: 'DELETE' });
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}));
+      throw new Error(d.error ?? `HTTP ${res.status}`);
+    }
+    toast('Playlist unlinked', 'info');
+    await fetchMyLinks();
+  } catch (err) {
+    toast(`Unlink failed: ${err.message}`, 'error');
+    btn.disabled      = false;
+    btn.textContent   = 'Unlink';
+    btn.dataset.armed = 'false';
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Link Playlist Modal
+// ---------------------------------------------------------------------------
+
+async function openLinkModal() {
+  state.selectedTidalPlaylist  = null;
+  state.selectedSharedPlaylist = null;
+
+  // Reset to step 1
+  document.getElementById('link-step-1').hidden = false;
+  document.getElementById('link-step-2').hidden = true;
+  document.getElementById('link-next-btn').disabled = true;
+  document.getElementById('link-next-btn').textContent = 'Next';
+  document.getElementById('link-back-btn').hidden = true;
+
+  openModal('link-modal');
+
+  // Load Tidal playlists
+  const listEl = document.getElementById('tidal-playlists-list');
+  listEl.innerHTML = '<div class="loading-state"><div class="spinner"></div><span>Loading your Tidal playlists…</span></div>';
+
+  try {
+    const res = await fetch(`${BASE_URL}/api/tidal/playlists`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json(); // JSON:API data array
+
+    if (data.length === 0) {
+      listEl.innerHTML = '<div class="empty-state"><p class="empty-title">No Tidal playlists found</p><p class="empty-sub">Create a playlist in Tidal first.</p></div>';
+      return;
+    }
+
+    listEl.innerHTML = data.map((pl) => {
+      const name  = pl.attributes?.name ?? pl.attributes?.title ?? pl.id;
+      const count = pl.attributes?.numberOfItems ?? pl.attributes?.numberOfTracks ?? '';
+      return `
+        <button class="select-item" data-id="${escHtml(pl.id)}" data-name="${escHtml(name)}">
+          <span class="select-item-name">${escHtml(name)}</span>
+          ${count !== '' ? `<span class="select-item-meta">${count} tracks</span>` : ''}
+        </button>`;
+    }).join('');
+
+    listEl.querySelectorAll('.select-item').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        listEl.querySelectorAll('.select-item').forEach((b) => b.classList.remove('selected'));
+        btn.classList.add('selected');
+        state.selectedTidalPlaylist = { id: btn.dataset.id, name: btn.dataset.name };
+        document.getElementById('link-next-btn').disabled = false;
+      });
+    });
+  } catch (err) {
+    listEl.innerHTML = `<div class="empty-state"><p class="empty-title">Failed to load Tidal playlists</p><p class="empty-sub">${escHtml(err.message)}</p></div>`;
+  }
+}
+
+async function handleLinkNext() {
+  const step1 = document.getElementById('link-step-1');
+  const step2 = document.getElementById('link-step-2');
+  const nextBtn = document.getElementById('link-next-btn');
+  const backBtn = document.getElementById('link-back-btn');
+
+  if (!step2.hidden) {
+    // We're on step 2 — confirm the link
+    if (!state.selectedTidalPlaylist || !state.selectedSharedPlaylist) return;
+
+    nextBtn.disabled    = true;
+    nextBtn.textContent = 'Linking…';
+
+    try {
+      const res = await fetch(`${BASE_URL}/api/links`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({
+          sharedPlaylistId: state.selectedSharedPlaylist.id,
+          tidalPlaylistId:  state.selectedTidalPlaylist.id,
+          tidalPlaylistName: state.selectedTidalPlaylist.name,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+
+      closeModal('link-modal');
+      toast(`Linked "${state.selectedTidalPlaylist.name}" → "${state.selectedSharedPlaylist.name}"`, 'success');
+      await fetchMyLinks();
+    } catch (err) {
+      toast(`Link failed: ${err.message}`, 'error');
+      nextBtn.disabled    = false;
+      nextBtn.textContent = 'Link Playlists';
+    }
+    return;
+  }
+
+  // Move from step 1 → step 2
+  step1.hidden = true;
+  step2.hidden = false;
+  backBtn.hidden = false;
+  nextBtn.disabled = true;
+  nextBtn.textContent = 'Link Playlists';
+
+  const listEl = document.getElementById('shared-playlists-select-list');
+  listEl.innerHTML = '<div class="loading-state"><div class="spinner"></div><span>Loading shared playlists…</span></div>';
+
+  try {
+    const res = await fetch(`${BASE_URL}/api/shared-playlists`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const playlists = await res.json();
+
+    if (playlists.length === 0) {
+      listEl.innerHTML = '<div class="empty-state"><p class="empty-title">No shared playlists yet</p><p class="empty-sub">Ask an admin to create one first.</p></div>';
+      return;
+    }
+
+    listEl.innerHTML = playlists.map((pl) => `
+      <button class="select-item" data-id="${pl.id}" data-name="${escHtml(pl.name)}">
+        <span class="select-item-name">${escHtml(pl.name)}</span>
+        <span class="select-item-meta">${pl.track_count} tracks · ${pl.user_count} users</span>
+      </button>`).join('');
+
+    listEl.querySelectorAll('.select-item').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        listEl.querySelectorAll('.select-item').forEach((b) => b.classList.remove('selected'));
+        btn.classList.add('selected');
+        state.selectedSharedPlaylist = { id: parseInt(btn.dataset.id, 10), name: btn.dataset.name };
+        document.getElementById('link-next-btn').disabled = false;
+      });
+    });
+  } catch (err) {
+    listEl.innerHTML = `<div class="empty-state"><p class="empty-title">Failed to load playlists</p><p class="empty-sub">${escHtml(err.message)}</p></div>`;
+  }
+}
+
+function handleLinkBack() {
+  document.getElementById('link-step-1').hidden = false;
+  document.getElementById('link-step-2').hidden = true;
+  document.getElementById('link-back-btn').hidden = true;
+  document.getElementById('link-next-btn').textContent = 'Next';
+  document.getElementById('link-next-btn').disabled = !state.selectedTidalPlaylist;
+  state.selectedSharedPlaylist = null;
+}
+
+// ---------------------------------------------------------------------------
+// Admin view
+// ---------------------------------------------------------------------------
+
+async function refreshAdmin() {
   await Promise.allSettled([fetchPlaylists(), fetchUsers()]);
 }
 
@@ -111,11 +613,7 @@ async function fetchLinkedUsers(playlistId) {
 function renderStats() {
   const totalPlaylists = state.playlists.length;
   const totalTracks    = state.playlists.reduce((s, p) => s + (p.track_count ?? 0), 0);
-  // Unique user IDs across all playlist links
-  const linkedUsers    = new Set(
-    state.users.map((u) => u.user_id)
-  ).size;
-  // "Recently active" = last_seen within past 5 minutes
+  const linkedUsers    = new Set(state.users.map((u) => u.user_id)).size;
   const fiveMinsAgo   = Math.floor(Date.now() / 1000) - 300;
   const onlineCount   = state.users.filter((u) => u.last_seen >= fiveMinsAgo).length;
 
@@ -137,7 +635,7 @@ function renderPlaylists() {
       <div class="empty-state" style="grid-column:1/-1">
         <div class="empty-icon">🎵</div>
         <p class="empty-title">No shared playlists yet</p>
-        <p class="empty-sub">Click <strong>New Playlist</strong> to create one and invite collaborators.</p>
+        <p class="empty-sub">Click <strong>New Playlist</strong> to create one.</p>
       </div>`;
     return;
   }
@@ -202,7 +700,7 @@ function renderUsers() {
     list.innerHTML = `
       <div class="empty-state">
         <p class="empty-title">No users have connected yet</p>
-        <p class="empty-sub">Users appear here after they authenticate via the browser extension.</p>
+        <p class="empty-sub">Users appear here after they sign in and link a playlist.</p>
       </div>`;
     return;
   }
@@ -212,7 +710,7 @@ function renderUsers() {
     const isOnline    = u.last_seen >= fiveMinsAgo;
     return `
       <tr>
-        <td class="user-id">${escHtml(u.user_id)}</td>
+        <td>${escHtml(u.display_name)}</td>
         <td>${escHtml(u.shared_playlist_name)}</td>
         <td class="text-muted">${timeAgo(u.last_seen)}</td>
         <td>
@@ -227,7 +725,7 @@ function renderUsers() {
     <table class="users-table">
       <thead>
         <tr>
-          <th>User ID</th>
+          <th>User</th>
           <th>Playlist</th>
           <th>Last Seen</th>
           <th>Status</th>
@@ -244,10 +742,10 @@ function renderUsers() {
 async function handleCreateSubmit(e) {
   e.preventDefault();
 
-  const name    = document.getElementById('pl-name').value.trim();
-  const desc    = document.getElementById('pl-desc').value.trim();
-  const errEl   = document.getElementById('create-error');
-  const btn     = document.getElementById('create-submit-btn');
+  const name  = document.getElementById('pl-name').value.trim();
+  const desc  = document.getElementById('pl-desc').value.trim();
+  const errEl = document.getElementById('create-error');
+  const btn   = document.getElementById('create-submit-btn');
 
   errEl.textContent = '';
 
@@ -287,11 +785,9 @@ async function handleDelete(id, btn) {
   const pl   = state.playlists.find((p) => p.id === id);
   const name = pl?.name ?? `Playlist #${id}`;
 
-  // First click: arm the button
   if (btn.dataset.armed !== 'true') {
-    btn.dataset.armed   = 'true';
-    btn.textContent     = 'Confirm?';
-    // Auto-disarm after 3 s
+    btn.dataset.armed = 'true';
+    btn.textContent   = 'Confirm?';
     setTimeout(() => {
       if (btn.dataset.armed === 'true') {
         btn.dataset.armed = 'false';
@@ -301,7 +797,6 @@ async function handleDelete(id, btn) {
     return;
   }
 
-  // Second click: execute
   btn.disabled    = true;
   btn.textContent = 'Deleting…';
 
@@ -333,7 +828,6 @@ async function openViewModal(id) {
   document.getElementById('view-modal-subtitle').textContent =
     `${pl.track_count} track${pl.track_count !== 1 ? 's' : ''} · ${pl.user_count} user${pl.user_count !== 1 ? 's' : ''}`;
 
-  // Add tabs for tracks and users
   document.getElementById('view-modal-body').innerHTML = `
     <div class="view-modal-tabs">
       <button class="tab-button tab-active" data-tab="tracks">Tracks</button>
@@ -348,7 +842,6 @@ async function openViewModal(id) {
 
   openModal('view-modal');
 
-  // Add tab click handlers
   document.querySelectorAll('.tab-button').forEach((btn) => {
     btn.addEventListener('click', () => switchTab(btn.dataset.tab, id));
   });
@@ -366,21 +859,15 @@ async function openViewModal(id) {
 }
 
 function switchTab(tabName, playlistId) {
-  // Update active tab button
   document.querySelectorAll('.tab-button').forEach((btn) => {
     btn.classList.toggle('tab-active', btn.dataset.tab === tabName);
   });
-
-  // Show/hide tab content
   document.querySelectorAll('.tab-content').forEach((el) => {
     el.style.display = 'none';
   });
   document.getElementById(`tab-${tabName}`).style.display = 'block';
 
-  // Load users if switching to users tab
-  if (tabName === 'users') {
-    loadLinkedUsersTab(playlistId);
-  }
+  if (tabName === 'users') loadLinkedUsersTab(playlistId);
 }
 
 async function loadLinkedUsersTab(playlistId) {
@@ -405,16 +892,14 @@ function renderLinkedUsersInModal(users) {
       <div class="empty-state">
         <div class="empty-icon">👥</div>
         <p class="empty-title">No users linked yet</p>
-        <p class="empty-sub">
-          Users will appear here once they link this playlist via the browser extension.
-        </p>
+        <p class="empty-sub">Users will appear here once they link this playlist.</p>
       </div>`;
     return;
   }
 
   const rows = users.map((u) => `
     <tr>
-      <td class="user-id">${escHtml(u.user_id)}</td>
+      <td>${escHtml(u.display_name)}</td>
       <td>${escHtml(u.tidal_playlist_name || '—')}</td>
       <td class="text-muted">${formatDate(u.created_at)}</td>
     </tr>`).join('');
@@ -423,7 +908,7 @@ function renderLinkedUsersInModal(users) {
     <table class="users-table">
       <thead>
         <tr>
-          <th>User ID</th>
+          <th>User</th>
           <th>Tidal Playlist Name</th>
           <th>Linked At</th>
         </tr>
@@ -441,27 +926,35 @@ function renderTracksInModal(tracks, pl) {
         <div class="empty-icon">🎵</div>
         <p class="empty-title">No tracks yet</p>
         <p class="empty-sub">
-          Users linked to <strong>${escHtml(pl.name)}</strong> will sync
-          tracks here automatically via the extension.
+          Users linked to <strong>${escHtml(pl.name)}</strong> will sync tracks here automatically.
         </p>
       </div>`;
     return;
   }
 
-  const rows = tracks.map((t, i) => `
+  const rows = tracks.map((t, i) => {
+    let trackDisplay;
+    if (t.track_title) {
+      trackDisplay = escHtml(t.track_title);
+      if (t.track_artist) trackDisplay += ` <span class="track-artist">· ${escHtml(t.track_artist)}</span>`;
+    } else {
+      trackDisplay = `<span class="text-muted">${escHtml(t.tidal_track_id)}</span>`;
+    }
+    return `
     <tr>
       <td class="track-pos text-muted">${i + 1}</td>
-      <td class="track-id">${escHtml(t.tidal_track_id)}</td>
-      <td class="user-id">${escHtml(t.added_by)}</td>
+      <td class="track-name">${trackDisplay}</td>
+      <td>${escHtml(t.added_by_name)}</td>
       <td class="text-muted">${formatDate(t.added_at)}</td>
-    </tr>`).join('');
+    </tr>`;
+  }).join('');
 
   body.innerHTML = `
     <table class="tracks-table">
       <thead>
         <tr>
           <th>#</th>
-          <th>Track ID</th>
+          <th>Track</th>
           <th>Added By</th>
           <th>Added At</th>
         </tr>
@@ -471,12 +964,12 @@ function renderTracksInModal(tracks, pl) {
 }
 
 // ---------------------------------------------------------------------------
-// WebSocket  (status + live refresh trigger)
+// WebSocket
 // ---------------------------------------------------------------------------
 
 function connectWebSocket() {
   if (state.ws) {
-    state.ws.onclose = null; // prevent reconnect loop on intentional close
+    state.ws.onclose = null;
     state.ws.close();
   }
 
@@ -492,47 +985,63 @@ function connectWebSocket() {
 
   state.ws = ws;
 
-  ws.addEventListener('open', () => {
-    ws.send(JSON.stringify({ type: 'auth', payload: { user_id: 'admin-panel' } }));
+  ws.onopen = () => {
     setWsStatus(true);
-  });
+  };
 
-  ws.addEventListener('message', ({ data }) => {
+  ws.onmessage = ({ data }) => {
     try {
       const msg = JSON.parse(data);
-      // Any live sync event → immediately refresh playlist stats
       if (['track_added', 'track_removed', 'tracks_reordered'].includes(msg.type)) {
-        fetchPlaylists();
+        if (state.view === 'admin') fetchPlaylists();
         showSyncNotification(msg);
       }
     } catch { /* ignore malformed messages */ }
-  });
+  };
 
-  ws.addEventListener('close', () => {
+  ws.onclose = () => {
     setWsStatus(false);
     setTimeout(connectWebSocket, 3_000);
-  });
+  };
 
-  ws.addEventListener('error', () => {
-    // 'close' fires right after, which handles reconnect
+  ws.onerror = () => {
     ws.close();
-  });
+  };
 }
 
 function setWsStatus(online) {
+  if (online) {
+    // Clear any pending disconnect notification and immediately show connected
+    clearTimeout(state.wsDisconnectTimer);
+    state.wsDisconnectTimer = null;
+    _applyWsStatus(true);
+  } else {
+    // Debounce: only show Disconnected after 1.5s to absorb brief mobile hiccups
+    if (!state.wsDisconnectTimer) {
+      state.wsDisconnectTimer = setTimeout(() => {
+        state.wsDisconnectTimer = null;
+        _applyWsStatus(false);
+      }, 1500);
+    }
+  }
+}
+
+function _applyWsStatus(online) {
   state.wsConnected = online;
   const el    = document.getElementById('ws-status');
   const label = el.querySelector('.ws-label');
   el.className      = `ws-status ${online ? 'ws-connected' : 'ws-disconnected'}`;
   label.textContent = online ? 'Connected' : 'Disconnected';
-  renderStats(); // update "Recently Active" counter
 }
 
 function showSyncNotification(msg) {
+  const trackLabel = msg.track_title
+    ? `"${msg.track_title}"`
+    : `track ${msg.tidal_track_id ?? ''}`;
   const map = {
-    track_added:      `Track added to playlist ${msg.shared_playlist_id}`,
-    track_removed:    `Track removed from playlist ${msg.shared_playlist_id}`,
-    tracks_reordered: `Playlist ${msg.shared_playlist_id} reordered`,
+    track_added:      `${trackLabel} added`,
+    track_removed:    `${trackLabel} removed`,
+    tracks_reordered: `Playlist reordered`,
   };
   const text = map[msg.type];
   if (text) toast(text, 'info');
@@ -547,7 +1056,6 @@ function openModal(id) {
   el.setAttribute('aria-hidden', 'false');
   el.classList.add('modal-open');
   document.body.classList.add('no-scroll');
-  // Focus first focusable element
   setTimeout(() => {
     const first = el.querySelector('input:not([disabled]), textarea:not([disabled]), button:not([disabled])');
     first?.focus();
@@ -599,7 +1107,6 @@ function setLoadingBtn(btn, loading) {
   if (spinner) spinner.hidden = !loading;
 }
 
-/** Escape HTML entities to prevent XSS */
 function escHtml(str) {
   return String(str)
     .replace(/&/g, '&amp;')
@@ -609,7 +1116,6 @@ function escHtml(str) {
     .replace(/'/g, '&#39;');
 }
 
-/** Format a Unix timestamp (seconds) to a short locale string */
 function formatDate(unixSecs) {
   return new Date(unixSecs * 1000).toLocaleString(undefined, {
     month: 'short', day: 'numeric',
@@ -617,7 +1123,6 @@ function formatDate(unixSecs) {
   });
 }
 
-/** Convert a Unix timestamp (seconds) to a relative "X ago" string */
 function timeAgo(unixSecs) {
   const diff = Math.floor(Date.now() / 1000) - unixSecs;
   if (diff < 10)    return 'just now';

@@ -44,6 +44,22 @@ CREATE TABLE IF NOT EXISTS active_users (
   UNIQUE(user_id, shared_playlist_id)
 );
 
+-- Key/value store for server configuration (e.g. admin_pin)
+CREATE TABLE IF NOT EXISTS settings (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+
+-- Authenticated users (tokens stored encrypted)
+CREATE TABLE IF NOT EXISTS users (
+  user_id           TEXT    PRIMARY KEY,
+  display_name      TEXT,
+  access_token_enc  TEXT    NOT NULL,
+  refresh_token_enc TEXT    NOT NULL,
+  token_expires_at  INTEGER NOT NULL,
+  created_at        INTEGER NOT NULL DEFAULT (unixepoch())
+);
+
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_tracks_playlist  ON tracks(shared_playlist_id);
 CREATE INDEX IF NOT EXISTS idx_tracks_position  ON tracks(shared_playlist_id, position);

@@ -29,6 +29,12 @@ function init() {
   try {
     db.exec('ALTER TABLE playlist_links ADD COLUMN tidal_playlist_name TEXT');
   } catch { /* column already exists */ }
+  try {
+    db.exec('ALTER TABLE tracks ADD COLUMN track_title TEXT');
+  } catch { /* column already exists */ }
+  try {
+    db.exec('ALTER TABLE tracks ADD COLUMN track_artist TEXT');
+  } catch { /* column already exists */ }
 
   console.log(`[db] opened ${config.DB_PATH}`);
   return db;
@@ -114,8 +120,11 @@ function checkLinkExists(sharedPlaylistId, userId) {
 
 function getLinkedUsers(sharedPlaylistId) {
   return db.prepare(`
-    SELECT pl.user_id, pl.tidal_playlist_name, pl.tidal_playlist_id, pl.created_at
+    SELECT pl.user_id,
+           COALESCE(u.display_name, pl.user_id) AS display_name,
+           pl.tidal_playlist_name, pl.tidal_playlist_id, pl.created_at
     FROM playlist_links pl
+    LEFT JOIN users u ON u.user_id = pl.user_id
     WHERE pl.shared_playlist_id = ?
     ORDER BY pl.created_at ASC
   `).all(sharedPlaylistId);
@@ -127,9 +136,11 @@ function getLinkedUsers(sharedPlaylistId) {
 
 function getPlaylistTracks(sharedPlaylistId) {
   return db.prepare(`
-    SELECT * FROM tracks
-    WHERE shared_playlist_id = ? AND removed_at IS NULL
-    ORDER BY position ASC
+    SELECT t.*, COALESCE(u.display_name, t.added_by) AS added_by_name
+    FROM tracks t
+    LEFT JOIN users u ON u.user_id = t.added_by
+    WHERE t.shared_playlist_id = ? AND t.removed_at IS NULL
+    ORDER BY t.position ASC
   `).all(sharedPlaylistId);
 }
 
@@ -144,7 +155,7 @@ function getMaxPosition(sharedPlaylistId) {
 /**
  * Add a track. Returns the inserted row, or null if the track is already active.
  */
-function addTrack(sharedPlaylistId, tidalTrackId, addedBy, position) {
+function addTrack(sharedPlaylistId, tidalTrackId, addedBy, position, trackTitle = null, trackArtist = null) {
   const existing = db.prepare(`
     SELECT id FROM tracks
     WHERE shared_playlist_id = ? AND tidal_track_id = ? AND removed_at IS NULL
@@ -153,9 +164,9 @@ function addTrack(sharedPlaylistId, tidalTrackId, addedBy, position) {
   if (existing) return null;
 
   const info = db.prepare(`
-    INSERT INTO tracks (shared_playlist_id, tidal_track_id, added_by, position)
-    VALUES (?, ?, ?, ?)
-  `).run(sharedPlaylistId, tidalTrackId, addedBy, position);
+    INSERT INTO tracks (shared_playlist_id, tidal_track_id, added_by, position, track_title, track_artist)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(sharedPlaylistId, tidalTrackId, addedBy, position, trackTitle, trackArtist);
 
   return db.prepare('SELECT * FROM tracks WHERE id = ?').get(info.lastInsertRowid);
 }
@@ -190,6 +201,57 @@ function updateTrackPositions(sharedPlaylistId, positions) {
 }
 
 // ---------------------------------------------------------------------------
+// settings
+// ---------------------------------------------------------------------------
+
+function getSetting(key) {
+  return db.prepare('SELECT value FROM settings WHERE key = ?').get(key)?.value ?? null;
+}
+
+function setSetting(key, value) {
+  return db.prepare(`
+    INSERT INTO settings (key, value) VALUES (?, ?)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+  `).run(key, value);
+}
+
+// ---------------------------------------------------------------------------
+// users
+// ---------------------------------------------------------------------------
+
+function upsertUser(userId, displayName, accessTokenEnc, refreshTokenEnc, tokenExpiresAt) {
+  return db.prepare(`
+    INSERT INTO users (user_id, display_name, access_token_enc, refresh_token_enc, token_expires_at)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(user_id) DO UPDATE SET
+      display_name      = excluded.display_name,
+      access_token_enc  = excluded.access_token_enc,
+      refresh_token_enc = excluded.refresh_token_enc,
+      token_expires_at  = excluded.token_expires_at
+  `).run(userId, displayName, accessTokenEnc, refreshTokenEnc, tokenExpiresAt);
+}
+
+function getUser(userId) {
+  return db.prepare('SELECT * FROM users WHERE user_id = ?').get(userId);
+}
+
+function deleteUser(userId) {
+  db.prepare('DELETE FROM playlist_links WHERE user_id = ?').run(userId);
+  return db.prepare('DELETE FROM users WHERE user_id = ?').run(userId);
+}
+
+/**
+ * Returns all users that have at least one playlist link (i.e., need polling).
+ */
+function getAllUsersWithLinks() {
+  return db.prepare(`
+    SELECT DISTINCT u.*
+    FROM users u
+    INNER JOIN playlist_links pl ON pl.user_id = u.user_id
+  `).all();
+}
+
+// ---------------------------------------------------------------------------
 // active_users
 // ---------------------------------------------------------------------------
 
@@ -206,11 +268,13 @@ function getActiveUsers() {
   return db.prepare(`
     SELECT
       au.user_id,
+      COALESCE(u.display_name, au.user_id) AS display_name,
       au.shared_playlist_id,
       sp.name AS shared_playlist_name,
       au.last_seen
     FROM active_users au
     JOIN shared_playlists sp ON sp.id = au.shared_playlist_id
+    LEFT JOIN users u ON u.user_id = au.user_id
     ORDER BY au.last_seen DESC
   `).all();
 }
@@ -222,6 +286,14 @@ function getActiveUsers() {
 module.exports = {
   init,
   close,
+  // settings
+  getSetting,
+  setSetting,
+  // users
+  upsertUser,
+  getUser,
+  deleteUser,
+  getAllUsersWithLinks,
   // shared_playlists
   getSharedPlaylists,
   createSharedPlaylist,

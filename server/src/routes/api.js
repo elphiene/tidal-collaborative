@@ -1,7 +1,10 @@
 'use strict';
 
 const { Router } = require('express');
-const db = require('../db');
+const db         = require('../db');
+const { encrypt, decrypt }  = require('../crypto');
+const tidal      = require('../tidal');
+const { pollNow, initNewLink } = require('../poller');
 
 const router = Router();
 
@@ -14,11 +17,163 @@ router.get('/ping', (_req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// Auth — OAuth 2.1 PKCE, server-side
+// ---------------------------------------------------------------------------
+
+// In-memory PKCE state store: state -> { codeVerifier, created }
+const pkceStore = new Map();
+const PKCE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+// GET /api/auth/start
+// Generates PKCE params and returns the Tidal authorize URL.
+router.get('/auth/start', (req, res) => {
+  const codeVerifier  = tidal.generateCodeVerifier();
+  const codeChallenge = tidal.generateCodeChallenge(codeVerifier);
+  const state         = tidal.generateState();
+
+  pkceStore.set(state, { codeVerifier, created: Date.now() });
+  setTimeout(() => pkceStore.delete(state), PKCE_TTL_MS);
+
+  // Build redirect URI from the incoming request so it works on any host
+  const proto       = req.headers['x-forwarded-proto'] ?? req.protocol;
+  const host        = req.headers['x-forwarded-host'] ?? req.headers.host;
+  const redirectUri = `${proto}://${host}/api/auth/callback`;
+
+  const authUrl = tidal.buildAuthUrl(redirectUri, codeChallenge, state);
+
+  console.log(`[api] auth/start: state=${state.slice(0, 8)}… redirectUri=${redirectUri}`);
+  res.json({ authUrl, redirectUri });
+});
+
+// GET /api/auth/callback  (Tidal redirects here after user logs in)
+router.get('/auth/callback', async (req, res) => {
+  const { code, state, error } = req.query;
+
+  if (error) {
+    console.error('[api] auth/callback error:', error);
+    return res.redirect('/?auth=error&reason=' + encodeURIComponent(error));
+  }
+
+  const entry = pkceStore.get(state);
+  if (!entry || !code) {
+    console.error('[api] auth/callback: invalid state or missing code');
+    return res.redirect('/?auth=error&reason=invalid_state');
+  }
+
+  pkceStore.delete(state); // one-time use
+
+  try {
+    const proto       = req.headers['x-forwarded-proto'] ?? req.protocol;
+    const host        = req.headers['x-forwarded-host'] ?? req.headers.host;
+    const redirectUri = `${proto}://${host}/api/auth/callback`;
+
+    const tokens  = await tidal.exchangeCode(code, entry.codeVerifier, redirectUri);
+    const profile = await tidal.fetchUserProfile(tokens.accessToken);
+
+    if (!profile.userId) throw new Error('Could not determine Tidal user ID');
+
+    db.upsertUser(
+      profile.userId,
+      profile.displayName,
+      encrypt(tokens.accessToken),
+      encrypt(tokens.refreshToken),
+      tokens.expiresAt,
+    );
+
+    req.session.userId = profile.userId;
+    console.log(`[api] auth/callback: signed in as ${profile.displayName} (${profile.userId})`);
+    req.session.save(() => res.redirect('/?auth=ok'));
+  } catch (err) {
+    console.error('[api] auth/callback failed:', err.message);
+    res.redirect('/?auth=error&reason=' + encodeURIComponent(err.message.slice(0, 100)));
+  }
+});
+
+// POST /api/auth/logout
+router.post('/auth/logout', (req, res) => {
+  req.session.destroy(() => {
+    res.json({ ok: true });
+  });
+});
+
+// GET /api/me
+router.get('/me', (req, res) => {
+  if (!req.session.userId) return res.status(401).json({ error: 'Not signed in' });
+  const user = db.getUser(req.session.userId);
+  if (!user) {
+    req.session.destroy(() => {});
+    return res.status(401).json({ error: 'Not signed in' });
+  }
+  res.json({ userId: user.user_id, displayName: user.display_name });
+});
+
+// ---------------------------------------------------------------------------
+// Admin PIN auth
+// ---------------------------------------------------------------------------
+
+// GET /api/admin/status
+router.get('/admin/status', (req, res) => {
+  res.json({
+    pinSet: !!db.getSetting('admin_pin'),
+    authed: !!req.session.adminAuthed,
+  });
+});
+
+// POST /api/admin/setup  — first-time PIN creation
+router.post('/admin/setup', (req, res) => {
+  if (db.getSetting('admin_pin')) return res.status(409).json({ error: 'PIN already set' });
+  const pin = String(req.body?.pin ?? '').trim();
+  if (pin.length !== 4) return res.status(400).json({ error: 'PIN must be 4 digits' });
+  db.setSetting('admin_pin', pin);
+  req.session.adminAuthed = true;
+  req.session.save(() => res.json({ ok: true }));
+});
+
+// POST /api/admin/auth  — verify PIN
+router.post('/admin/auth', (req, res) => {
+  const stored = db.getSetting('admin_pin');
+  if (!stored) return res.status(400).json({ error: 'No PIN set yet' });
+  const pin = String(req.body?.pin ?? '').trim();
+  if (pin !== stored) return res.status(401).json({ error: 'Incorrect PIN' });
+  req.session.adminAuthed = true;
+  req.session.save(() => res.json({ ok: true }));
+});
+
+// ---------------------------------------------------------------------------
+// Tidal pass-through
+// ---------------------------------------------------------------------------
+
+// GET /api/tidal/playlists
+router.get('/tidal/playlists', async (req, res) => {
+  if (!req.session.userId) return res.status(401).json({ error: 'Not signed in' });
+
+  try {
+    const user        = db.getUser(req.session.userId);
+    if (!user) return res.status(401).json({ error: 'Not signed in' });
+
+    let accessToken = decrypt(user.access_token_enc);
+
+    // Refresh if close to expiry
+    if (user.token_expires_at - Date.now() < 5 * 60 * 1000) {
+      const tokens = await tidal.refreshTokens(decrypt(user.refresh_token_enc));
+      db.upsertUser(user.user_id, user.display_name,
+        encrypt(tokens.accessToken), encrypt(tokens.refreshToken), tokens.expiresAt);
+      accessToken = tokens.accessToken;
+    }
+
+    const playlists = await tidal.tidalGetUserPlaylists(user.user_id, accessToken);
+    res.json(playlists);
+  } catch (err) {
+    console.error('[api] GET /tidal/playlists:', err.message);
+    res.status(500).json({ error: 'Failed to fetch playlists from Tidal' });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Shared playlists
 // ---------------------------------------------------------------------------
 
 // GET /api/shared-playlists
-// Returns all shared playlists with aggregated user_count and track_count.
 router.get('/shared-playlists', (_req, res) => {
   try {
     res.json(db.getSharedPlaylists());
@@ -93,24 +248,33 @@ router.get('/links/:userId', (req, res) => {
   }
 });
 
+// GET /api/links  (session-based — returns links for the signed-in user)
+router.get('/links', (req, res) => {
+  if (!req.session.userId) return res.status(401).json({ error: 'Not signed in' });
+  try {
+    res.json(db.getUserLinks(req.session.userId));
+  } catch (err) {
+    console.error('[api] GET /links', err.message);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // POST /api/links
-// Body: { sharedPlaylistId: number, userId: string, tidalPlaylistId: string, tidalPlaylistName?: string }
-// Returns: { link, tracks } — tracks used by the extension for initial sync.
+// Body: { sharedPlaylistId: number, tidalPlaylistId: string, tidalPlaylistName?: string }
+// userId comes from session; body.userId accepted as fallback for compatibility.
 router.post('/links', (req, res) => {
-  const { sharedPlaylistId, userId, tidalPlaylistId, tidalPlaylistName } = req.body ?? {};
+  const userId = req.session.userId ?? req.body?.userId;
+  const { sharedPlaylistId, tidalPlaylistId, tidalPlaylistName } = req.body ?? {};
 
   if (!sharedPlaylistId || !userId || !tidalPlaylistId) {
     return res.status(400).json({
-      error: '"sharedPlaylistId", "userId", and "tidalPlaylistId" are all required',
+      error: '"sharedPlaylistId" and "tidalPlaylistId" are required (userId from session)',
     });
   }
 
   const spId = parseInt(sharedPlaylistId, 10);
   if (isNaN(spId)) return res.status(400).json({ error: 'Invalid sharedPlaylistId' });
 
-  if (typeof userId !== 'string' || !userId.trim()) {
-    return res.status(400).json({ error: 'Invalid userId' });
-  }
   if (typeof tidalPlaylistId !== 'string' || !tidalPlaylistId.trim()) {
     return res.status(400).json({ error: 'Invalid tidalPlaylistId' });
   }
@@ -123,6 +287,14 @@ router.post('/links', (req, res) => {
 
     const link   = db.createLink(spId, userId.trim(), tidalPlaylistId.trim(), tidalPlaylistName || null);
     const tracks = db.getPlaylistTracks(spId);
+
+    // Seed the new user's Tidal playlist with existing shared tracks, then poll
+    // for any tracks they already had (those get merged into the shared playlist).
+    // Run in background — don't block the response.
+    initNewLink(link)
+      .then(() => pollNow())
+      .catch((err) => console.error('[api] initNewLink:', err.message));
+
     res.status(201).json({ link, tracks });
   } catch (err) {
     console.error('[api] POST /links', err.message);
@@ -146,7 +318,6 @@ router.delete('/links/:id', (req, res) => {
 });
 
 // GET /api/shared-playlists/:id/linked-users
-// Returns all users linked to a shared playlist with their Tidal playlist names
 router.get('/shared-playlists/:id/linked-users', (req, res) => {
   const id = parseInt(req.params.id, 10);
   if (isNaN(id)) return res.status(400).json({ error: 'Invalid id' });
@@ -165,8 +336,6 @@ router.get('/shared-playlists/:id/linked-users', (req, res) => {
 // ---------------------------------------------------------------------------
 
 // GET /api/users
-// Returns all rows from active_users joined with shared_playlist name.
-// Used by the admin panel to show the "Recent Users" table.
 router.get('/users', (_req, res) => {
   try {
     res.json(db.getActiveUsers());

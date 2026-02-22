@@ -1,6 +1,6 @@
 # Deploying to CasaOS
 
-This guide walks through running **Tidal Collaborative** as a Docker container on CasaOS (or any home-lab Linux host).
+This guide walks through installing **Tidal Collaborative** via the CasaOS web UI. No cloning or building required — the image is pulled directly from Docker Hub.
 
 ---
 
@@ -8,191 +8,190 @@ This guide walks through running **Tidal Collaborative** as a Docker container o
 
 | Requirement | Version | Check |
 |-------------|---------|-------|
-| Docker Engine | 24+ | `docker --version` |
-| Docker Compose plugin | v2+ | `docker compose version` |
-| Git | any | `git --version` |
-| curl | any | `curl --version` |
+| CasaOS | any recent | — |
+| Docker Engine | 24+ (pre-installed on CasaOS) | `docker --version` |
 | Free RAM | ≥ 128 MB | — |
 | Free disk | ≥ 100 MB | — |
 
-> **CasaOS note:** Docker and Docker Compose come pre-installed on CasaOS.
-> If in doubt, open the CasaOS web UI → **App Store** → verify Docker is running.
+Node.js is only needed to generate secrets. You can run the commands below on any machine that has it — your laptop, a phone terminal app, etc.
 
 ---
 
-## Step-by-step deployment
+## Before you start — Tidal developer app
 
-### 1 — Clone the repository onto CasaOS
+You need a free Tidal developer application:
 
-SSH into your CasaOS machine (or open a terminal in the CasaOS web UI):
+1. Go to [developer.tidal.com](https://developer.tidal.com) and sign in
+2. Create a new application
+3. Add this **Redirect URI**:
+   - `http://<your-server-ip>:3000/api/auth/callback`
+4. Copy the **Client ID** — you'll need it later
 
-```bash
-# Replace with wherever you keep your projects
-cd /DATA/AppData
-git clone https://github.com/yourname/tidal-collaborative.git
-cd tidal-collaborative
-```
+---
 
-### 2 — Enter the docker directory
+## Step 1 — Generate secrets
 
-All build and run scripts live here:
-
-```bash
-cd docker
-```
-
-### 3 — Build the Docker image
+Run the following command **twice** (once for `ENCRYPTION_KEY`, once for `SESSION_SECRET`). This can be done on any machine with Node.js:
 
 ```bash
-chmod +x build.sh run.sh
-./build.sh
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 ```
 
-The build process:
-1. Pulls `node:20-alpine` from Docker Hub (≈ 130 MB)
-2. Installs only production dependencies (`npm ci --omit=dev`)
-3. Copies the server and web UI into the image
-4. Tags the image as `tidal-collaborative:latest` + a timestamped version
+Save both 64-character hex strings — you'll paste them into the compose config in the next step.
 
-Expected output:
+> **Keep these safe.** `ENCRYPTION_KEY` encrypts stored Tidal tokens at rest. If it changes, all users must sign in again.
+
+---
+
+## Step 2 — Install via CasaOS UI
+
+1. Open the CasaOS web UI
+2. Go to **Apps** → **Install a customized app**
+3. Click **Import** (or the compose/YAML tab)
+4. Paste the following, replacing the two placeholder values with your generated secrets:
+
+```yaml
+services:
+  tidal-collaborative:
+    image: elphiene/tidal-collaborative:latest
+    container_name: tidal-collaborative
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - /DATA/AppData/tidal-collaborative:/app/data
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - DB_PATH=/app/data/db.sqlite
+      - ENCRYPTION_KEY=<paste-your-first-64-char-hex-here>
+      - SESSION_SECRET=<paste-your-second-64-char-hex-here>
+    networks:
+      - tidal-network
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:3000/api/ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+networks:
+  tidal-network:
+    driver: bridge
 ```
-✓ Build complete!
-  tidal-collaborative:latest   (95MB)
-  tidal-collaborative:20260201-1430   (95MB)
-```
 
-> **First build takes 1–3 minutes** depending on download speed.
-> Subsequent builds are much faster due to Docker layer caching.
+5. Click **Submit** — CasaOS will pull the image and start the container
 
-### 4 — Start the server
+---
+
+## Step 3 — Verify
 
 ```bash
-./run.sh
+curl http://<your-server-ip>:3000/api/ping
+# → {"ok":true,"ts":...}
 ```
 
-The script:
-1. Creates `docker/data/` for the SQLite database
-2. Stops any running container
-3. Starts the container in detached mode
-4. Waits for the health check to pass
-5. Tails the logs (press **Ctrl + C** to detach — the container keeps running)
-
-### 5 — Verify the server is running
-
-Open a browser or run:
-
-```bash
-curl http://192.168.100.31:3000/api/ping
-# → {"ok":true,"ts":1706800000000}
-```
-
-Then open the **admin panel** at:
-
-```
-http://192.168.100.31:3000
-```
-
-### 6 — Load the Chrome extension
-
-1. Open Chrome/Edge/Brave
-2. Navigate to `chrome://extensions`
-3. Enable **Developer mode** (top-right toggle)
-4. Click **Load unpacked**
-5. Select the `extension/` folder from the cloned repo
-6. Click the extension icon — enter `http://192.168.100.31:3000` and click **Connect**
+Then open `http://<your-server-ip>:3000` in any browser, click **Sign in with Tidal**, and complete the OAuth flow.
 
 ---
 
 ## Configuration
 
-All configuration is done through environment variables in `docker/docker-compose.yml`:
+All configuration lives in the environment block of the compose above:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PORT` | `3000` | HTTP/WS server port |
+| `PORT` | `3000` | HTTP/WS listen port |
 | `NODE_ENV` | `production` | Runtime mode |
-| `DB_PATH` | `/app/data/db.sqlite` | SQLite database path (inside container) |
+| `DB_PATH` | `/app/data/db.sqlite` | SQLite path inside the container |
+| `ENCRYPTION_KEY` | — | **Required.** 64 hex chars. Encrypts stored Tidal tokens. |
+| `SESSION_SECRET` | — | **Required.** Signs session cookies. Any long random string. |
 
-To change the port, edit `docker-compose.yml`:
+To change the host port, edit the `ports:` line before submitting (or update the app in CasaOS):
 ```yaml
 ports:
-  - "8080:3000"   # host:container — access on port 8080
+  - "8080:3000"   # access on port 8080
 ```
 
-Then restart: `docker compose down && docker compose up -d`
+---
+
+## Admin panel
+
+The admin panel is at `http://<your-server-ip>:3000` under the **Admin** tab.
+
+The first user to click **Admin** sets a 4-digit PIN. After that, the PIN is required to access admin features (create/delete shared playlists, view all users).
 
 ---
 
 ## Viewing logs
 
+In the CasaOS UI, open the app card and click the **Logs** button.
+
+Or via SSH:
+
 ```bash
-# Follow live logs
-cd /DATA/AppData/tidal-collaborative/docker
-docker compose logs -f
+docker logs tidal-collaborative -f
 
-# Last 100 lines only
-docker compose logs --tail=100
-
-# Logs for a specific time range
-docker compose logs --since="2026-02-01T10:00:00"
+# Last 100 lines
+docker logs tidal-collaborative --tail=100
 ```
 
 ---
 
 ## Updating to a new version
 
+In the CasaOS UI, open the app card and click **Update** when a new version is available.
+
+Or via SSH:
+
 ```bash
-cd /DATA/AppData/tidal-collaborative
-
-# 1. Pull latest code
-git pull
-
-# 2. Rebuild the image
-cd docker && ./build.sh --no-cache
-
-# 3. Restart the container (data is preserved in docker/data/)
-./run.sh --no-logs
+docker pull elphiene/tidal-collaborative:latest
+docker compose -p tidal-collaborative up -d
 ```
 
-The SQLite database in `docker/data/` is mounted as a Docker volume and is **never overwritten** by image rebuilds.
+The SQLite database in `/DATA/AppData/tidal-collaborative/` is a bind-mounted volume and is never touched by image updates.
 
 ---
 
 ## Backing up the database
 
-The entire database is a single file:
+The entire state is one file:
 
 ```bash
-# Copy to a backup location
-cp /DATA/AppData/tidal-collaborative/docker/data/db.sqlite \
-   /DATA/Backups/tidal-collaborative-$(date +%Y%m%d).sqlite
+cp /DATA/AppData/tidal-collaborative/db.sqlite \
+   /DATA/Backups/tidal-$(date +%Y%m%d).sqlite
 ```
 
 To restore:
+
 ```bash
-# Stop the container first
-cd /DATA/AppData/tidal-collaborative/docker
-docker compose down
-
-# Replace the database
-cp /DATA/Backups/tidal-collaborative-20260201.sqlite ./data/db.sqlite
-
-# Start again
-./run.sh
+docker stop tidal-collaborative
+cp /DATA/Backups/tidal-20260201.sqlite /DATA/AppData/tidal-collaborative/db.sqlite
+docker start tidal-collaborative
 ```
+
+> After restoring a backup, all users will need to sign in again only if the
+> `ENCRYPTION_KEY` is different from when the backup was made.
 
 ---
 
 ## Stopping and removing the container
 
+Use the CasaOS UI app card to stop or uninstall the container.
+
+Or via SSH:
+
 ```bash
-cd /DATA/AppData/tidal-collaborative/docker
-
 # Stop (data preserved)
-docker compose down
+docker stop tidal-collaborative
 
-# Stop + remove the image (full cleanup — data still preserved in ./data/)
-docker compose down --rmi all
+# Remove container (data still preserved in /DATA/AppData/tidal-collaborative/)
+docker rm tidal-collaborative
+docker rmi elphiene/tidal-collaborative
 ```
 
 ---
@@ -201,94 +200,91 @@ docker compose down --rmi all
 
 ### Container exits immediately
 
-Check the logs:
 ```bash
-docker compose logs tidal-collaborative
+docker logs tidal-collaborative
 ```
 
 Common causes:
-- **Port 3000 already in use** — change the host port in `docker-compose.yml`
-- **Permission error on data dir** — `chmod 777 docker/data/` then restart
+- **`ENCRYPTION_KEY` not set or wrong length** — must be exactly 64 hex characters
+- **Port 3000 already in use** — change the host port in the compose config
+- **Permission error on data dir** — `chmod 777 /DATA/AppData/tidal-collaborative/` then restart
 
-### "Could not reach server" in extension popup
+### Sign-in fails with "invalid_state" or "11102"
 
-- Confirm the container is running: `docker ps | grep tidal`
-- Confirm you're connected to the home network or VPN
-- Test from the browser: `http://192.168.100.31:3000/api/ping`
-- Check firewall: `sudo ufw status` — port 3000 should be allowed
+- Confirm the redirect URI registered in [developer.tidal.com](https://developer.tidal.com) exactly matches `http://<your-server-ip>:3000/api/auth/callback`
+- Check for trailing slashes or `https` vs `http` mismatches
+
+### Users signed out after restart
+
+If the `ENCRYPTION_KEY` changed (or was not set) since users last signed in, their stored tokens are unreadable and they must sign in again. Keep the key stable across restarts.
 
 ### Health check failing
 
 ```bash
-# Manual check
 docker exec tidal-collaborative curl -s http://localhost:3000/api/ping
-
-# Inspect container health history
 docker inspect tidal-collaborative --format='{{json .State.Health}}' | python3 -m json.tool
 ```
 
-### Database is locked or corrupted
+### Database locked or corrupted
 
 SQLite in WAL mode is robust, but if the container was force-killed:
 
 ```bash
-docker compose down
-sqlite3 docker/data/db.sqlite "PRAGMA integrity_check;"
+docker stop tidal-collaborative
+sqlite3 /DATA/AppData/tidal-collaborative/db.sqlite "PRAGMA integrity_check;"
 # Should output: ok
-docker compose up -d
+docker start tidal-collaborative
 ```
 
-### Out of disk space
+---
+
+## Optional — Build the image from source
+
+If you prefer to build locally instead of pulling from Docker Hub, clone the repo and use the provided scripts:
 
 ```bash
-# Check container and image sizes
-docker system df
+cd /DATA/AppData
+git clone https://github.com/elphiene/tidal-collaborative.git
+cd tidal-collaborative/docker
 
-# Remove old versioned images (keeps latest)
-docker images tidal-collaborative --format "{{.Tag}}" | grep -v latest | \
-  xargs -I{} docker rmi tidal-collaborative:{}
+# Single-platform local build
+chmod +x build.sh
+./build.sh
+
+# Multi-platform build + push to Docker Hub (maintainers only)
+chmod +x publish.sh
+./publish.sh
+```
+
+One-time buildx setup required for `publish.sh`:
+```bash
+docker buildx create --name mybuilder --use
+docker buildx inspect --bootstrap
 ```
 
 ---
 
-## CasaOS app integration (optional)
-
-If you want Tidal Collaborative to appear in the CasaOS dashboard:
-
-1. Open CasaOS web UI → **Apps** → **Install a customized app**
-2. Paste the contents of `docker/docker-compose.yml`
-3. Set the icon URL and app name
-4. Click **Submit**
-
-CasaOS will manage the container lifecycle alongside your other apps.
-
----
-
-## Network diagram
+## Network layout
 
 ```
-Your devices (VPN / home network)
+Your devices (home LAN or VPN)
          │
-         │  http://192.168.100.31:3000
+         │  http://<server-ip>:3000
          ▼
   ┌──────────────────────────────────┐
   │   Docker container               │
   │   tidal-collaborative            │
   │                                  │
-  │   ┌─────────────────────────┐   │
-  │   │  Node.js + Express       │   │  ← serves admin panel
-  │   │  WebSocket server        │   │  ← real-time sync
-  │   └────────────┬────────────┘   │
-  │                │                 │
-  │   ┌────────────▼────────────┐   │
-  │   │  SQLite DB               │   │
-  │   │  /app/data/db.sqlite     │   │
-  │   └─────────────────────────┘   │
-  │              ▲                   │
-  │    bind-mounted to               │
-  │    docker/data/db.sqlite         │
+  │   Node.js + Express              │
+  │   ├── Serves web UI              │
+  │   ├── REST API  /api/*           │
+  │   ├── WebSocket /ws              │
+  │   └── Polling loop (60s)         │
+  │         └── openapi.tidal.com ──►│── Tidal API (outbound)
+  │                                  │
+  │   SQLite  /app/data/db.sqlite    │
   └──────────────────────────────────┘
-         │  (mounted volume persists)
+         │  (bind-mounted volume)
          ▼
-  docker/data/db.sqlite  ←  backup this file!
+  /DATA/AppData/tidal-collaborative/db.sqlite  ← back this up
 ```

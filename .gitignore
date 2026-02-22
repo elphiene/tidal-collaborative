@@ -20,6 +20,7 @@ dist/
 # Editor / IDE
 .vscode/
 .idea/
+.claude/
 
 # OS
 .DS_Store
@@ -28,3 +29,6 @@ Thumbs.db
 # Logs
 *.log
 npm-debug.log*
+
+# Debug captures
+*.har

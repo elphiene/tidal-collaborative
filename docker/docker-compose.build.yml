@@ -1,0 +1,6 @@
+services:
+  tidal-collaborative:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: elphiene/tidal-collaborative:latest
