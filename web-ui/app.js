@@ -112,6 +112,13 @@ document.addEventListener('DOMContentLoaded', async () => {
 async function initSetupWizard() {
   const overlay = document.getElementById('setup-overlay');
 
+  // Wire up controls and show step 1 spinner BEFORE the fetch so the
+  // overlay is covering the page from the very first paint.
+  document.getElementById('setup-next-btn').addEventListener('click', handleSetupNext);
+  document.getElementById('setup-copy-uri').addEventListener('click', handleSetupCopy);
+  initSetupPinInputs();
+  goToSetupStep(1);
+
   let status;
   try {
     const res = await fetch(`${BASE_URL}/api/setup/status`);
@@ -121,36 +128,23 @@ async function initSetupWizard() {
   }
 
   if (status.complete) {
+    // Already set up — remove overlay immediately and run normal app init.
     overlay.remove();
     await checkAuth();
     return;
   }
 
-  // Show overlay
-  overlay.hidden = false;
+  // Show step 1 success state briefly, then advance to the right step.
+  const statusEl = document.getElementById('setup-step-1-status');
+  if (statusEl) statusEl.innerHTML = '<div class="setup-check">✓</div>';
 
-  // Wire up Continue button and copy button
-  document.getElementById('setup-next-btn').addEventListener('click', handleSetupNext);
-  document.getElementById('setup-copy-uri').addEventListener('click', handleSetupCopy);
-
-  // Wire up setup PIN digit inputs (scoped to setup overlay)
-  initSetupPinInputs();
-
-  // Step 1 always shows first — secrets are confirmed ready once server responds
-  goToSetupStep(1);
-
-  // Auto-advance: show success state briefly, then go to the right step
   setTimeout(() => {
-    const statusEl = document.getElementById('setup-step-1-status');
-    if (statusEl) statusEl.innerHTML = '<div class="setup-check">✓</div>';
-    setTimeout(() => {
-      if (status.clientIdSet && !status.adminPinSet) {
-        goToSetupStep(3);
-      } else {
-        goToSetupStep(2);
-        loadSetupRedirectUri();
-      }
-    }, 600);
+    if (status.clientIdSet && !status.adminPinSet) {
+      goToSetupStep(3);
+    } else {
+      goToSetupStep(2);
+      loadSetupRedirectUri();
+    }
   }, 800);
 }
 
