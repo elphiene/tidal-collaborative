@@ -78,12 +78,13 @@ async function pollUser(user, broadcastFn) {
 
   const links = db.getUserLinks(user.user_id);
 
-  for (const link of links) {
+  for (let i = 0; i < links.length; i++) {
+    if (i > 0) await new Promise((r) => setTimeout(r, 500));
     try {
-      await pollPlaylist(link, user.user_id, accessToken, broadcastFn);
+      await pollPlaylist(links[i], user.user_id, accessToken, broadcastFn);
     } catch (err) {
       console.error(
-        `[poller] poll failed for user=${user.user_id} tidalPlaylist=${link.tidal_playlist_id}: ${err.message}`,
+        `[poller] poll failed for user=${user.user_id} tidalPlaylist=${links[i].tidal_playlist_id}: ${err.message}`,
       );
     }
   }

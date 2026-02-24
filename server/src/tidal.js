@@ -192,7 +192,6 @@ async function tidalGetPlaylistTrackIds(playlistId, accessToken) {
     );
 
     const items = data?.data ?? [];
-    console.log(`[tidal] getPlaylistTrackIds ${playlistId}: offset=${offset} got ${items.length} items`);
     if (items.length === 0) break;
 
     for (const item of items) {
@@ -204,9 +203,11 @@ async function tidalGetPlaylistTrackIds(playlistId, accessToken) {
     // (e.g. 20) regardless of the limit parameter, which would cause
     // premature termination and a hard cap at one page of results.
     offset += items.length;
+
+    // Brief pause between pages to avoid bursting into Tidal's rate limit
+    await new Promise((r) => setTimeout(r, 300));
   }
 
-  console.log(`[tidal] getPlaylistTrackIds ${playlistId}: total=${ids.size}`);
   return ids;
 }
 
