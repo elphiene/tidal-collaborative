@@ -37,6 +37,7 @@ const state = {
   wsConnected:        false,
   wsDisconnectTimer:  null,
   pollTimer:          null,
+  sessionCheckTimer:  null,
 };
 
 // ---------------------------------------------------------------------------
@@ -60,6 +61,7 @@ async function apiFetch(url, opts) {
       state.ws = null;
     }
     clearInterval(state.pollTimer);
+    clearInterval(state.sessionCheckTimer);
     showSignedOut();
     toast('Your session has expired — please sign in again.', 'error');
   }
@@ -386,6 +388,7 @@ async function handleSignOut() {
     state.ws = null;
   }
   clearInterval(state.pollTimer);
+  clearInterval(state.sessionCheckTimer);
   showSignedOut();
 }
 
@@ -413,7 +416,8 @@ function showSignedIn() {
 
   switchView('my-playlists');
   connectWebSocket();
-  state.pollTimer = setInterval(refreshAdmin, POLL_MS);
+  state.pollTimer        = setInterval(refreshAdmin, POLL_MS);
+  state.sessionCheckTimer = setInterval(() => apiFetch(`${BASE_URL}/api/me`), 2 * 60 * 1000);
 }
 
 async function switchView(viewName) {
