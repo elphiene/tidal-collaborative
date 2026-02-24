@@ -40,6 +40,33 @@ const state = {
 };
 
 // ---------------------------------------------------------------------------
+// API fetch wrapper
+// ---------------------------------------------------------------------------
+
+/**
+ * Wrapper around fetch for all /api/* calls.
+ * If the server returns 401 while the user is signed in, tears down the
+ * session locally and shows the sign-in screen (token expired / revoked).
+ */
+async function apiFetch(url, opts) {
+  const res = await fetch(url, opts);
+  if (res.status === 401 && state.signedIn) {
+    state.userId      = null;
+    state.displayName = null;
+    state.signedIn    = false;
+    if (state.ws) {
+      state.ws.onclose = null;
+      state.ws.close();
+      state.ws = null;
+    }
+    clearInterval(state.pollTimer);
+    showSignedOut();
+    toast('Your session has expired — please sign in again.', 'error');
+  }
+  return res;
+}
+
+// ---------------------------------------------------------------------------
 // Bootstrap
 // ---------------------------------------------------------------------------
 
@@ -121,7 +148,7 @@ async function initSetupWizard() {
 
   let status;
   try {
-    const res = await fetch(`${BASE_URL}/api/setup/status`);
+    const res = await apiFetch(`${BASE_URL}/api/setup/status`);
     status = await res.json();
   } catch {
     status = { complete: false, clientIdSet: false, adminPinSet: false };
@@ -190,7 +217,7 @@ function goToSetupStep(n) {
 
 async function loadSetupRedirectUri() {
   try {
-    const res  = await fetch(`${BASE_URL}/api/setup/redirect-uri`);
+    const res  = await apiFetch(`${BASE_URL}/api/setup/redirect-uri`);
     const data = await res.json();
     document.getElementById('setup-redirect-uri').textContent = data.redirectUri ?? '';
   } catch {
@@ -228,7 +255,7 @@ async function handleSetupNext() {
     errEl.textContent   = '';
 
     try {
-      const res = await fetch(`${BASE_URL}/api/setup/tidal-client-id`, {
+      const res = await apiFetch(`${BASE_URL}/api/setup/tidal-client-id`, {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify({ clientId }),
@@ -254,7 +281,7 @@ async function handleSetupNext() {
     errEl.textContent   = '';
 
     try {
-      const res = await fetch(`${BASE_URL}/api/admin/setup`, {
+      const res = await apiFetch(`${BASE_URL}/api/admin/setup`, {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify({ pin }),
@@ -309,7 +336,7 @@ function initSetupPinInputs() {
 
 async function checkAuth() {
   try {
-    const res = await fetch(`${BASE_URL}/api/me`);
+    const res = await apiFetch(`${BASE_URL}/api/me`);
     if (res.status === 401) {
       showSignedOut();
       return;
@@ -332,7 +359,7 @@ async function handleSignIn() {
   btn.textContent = 'Redirecting…';
 
   try {
-    const res  = await fetch(`${BASE_URL}/api/auth/start`);
+    const res  = await apiFetch(`${BASE_URL}/api/auth/start`);
     const data = await res.json();
     if (!data.authUrl) throw new Error('No auth URL returned');
     window.location.href = data.authUrl;
@@ -348,7 +375,7 @@ async function handleSignIn() {
 
 async function handleSignOut() {
   try {
-    await fetch(`${BASE_URL}/api/auth/logout`, { method: 'POST' });
+    await apiFetch(`${BASE_URL}/api/auth/logout`, { method: 'POST' });
   } catch { /* ignore */ }
   state.userId      = null;
   state.displayName = null;
@@ -417,7 +444,7 @@ async function switchView(viewName) {
 
 async function ensureAdminAuthed() {
   try {
-    const res  = await fetch(`${BASE_URL}/api/admin/status`);
+    const res  = await apiFetch(`${BASE_URL}/api/admin/status`);
     const data = await res.json();
     if (data.authed) return true;
     openPinModal(data.pinSet);
@@ -500,7 +527,7 @@ async function handlePinSubmit() {
   setLoadingBtn(submitBtn, true);
 
   try {
-    const res  = await fetch(`${BASE_URL}${endpoint}`, {
+    const res  = await apiFetch(`${BASE_URL}${endpoint}`, {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify({ pin }),
@@ -540,7 +567,7 @@ async function handlePinSubmit() {
 
 async function fetchMyLinks() {
   try {
-    const res = await fetch(`${BASE_URL}/api/links`);
+    const res = await apiFetch(`${BASE_URL}/api/links`);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     state.myLinks = await res.json();
     renderMyLinks();
@@ -606,7 +633,7 @@ async function handleUnlink(linkId, btn) {
   btn.textContent = 'Unlinking…';
 
   try {
-    const res = await fetch(`${BASE_URL}/api/links/${linkId}`, { method: 'DELETE' });
+    const res = await apiFetch(`${BASE_URL}/api/links/${linkId}`, { method: 'DELETE' });
     if (!res.ok) {
       const d = await res.json().catch(() => ({}));
       throw new Error(d.error ?? `HTTP ${res.status}`);
@@ -643,8 +670,11 @@ async function openLinkModal() {
   listEl.innerHTML = '<div class="loading-state"><div class="spinner"></div><span>Loading your Tidal playlists…</span></div>';
 
   try {
-    const res = await fetch(`${BASE_URL}/api/tidal/playlists`);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const res = await apiFetch(`${BASE_URL}/api/tidal/playlists`);
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.error ?? `HTTP ${res.status}`);
+    }
     const data = await res.json(); // JSON:API data array
 
     if (data.length === 0) {
@@ -689,7 +719,7 @@ async function handleLinkNext() {
     nextBtn.textContent = 'Linking…';
 
     try {
-      const res = await fetch(`${BASE_URL}/api/links`, {
+      const res = await apiFetch(`${BASE_URL}/api/links`, {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify({
@@ -723,7 +753,7 @@ async function handleLinkNext() {
   listEl.innerHTML = '<div class="loading-state"><div class="spinner"></div><span>Loading shared playlists…</span></div>';
 
   try {
-    const res = await fetch(`${BASE_URL}/api/shared-playlists`);
+    const res = await apiFetch(`${BASE_URL}/api/shared-playlists`);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const playlists = await res.json();
 
@@ -770,7 +800,7 @@ async function refreshAdmin() {
 
 async function fetchPlaylists() {
   try {
-    const res = await fetch(`${BASE_URL}/api/shared-playlists`);
+    const res = await apiFetch(`${BASE_URL}/api/shared-playlists`);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     state.playlists = await res.json();
     renderPlaylists();
@@ -782,7 +812,7 @@ async function fetchPlaylists() {
 
 async function fetchUsers() {
   try {
-    const res = await fetch(`${BASE_URL}/api/users`);
+    const res = await apiFetch(`${BASE_URL}/api/users`);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     state.users = await res.json();
     renderUsers();
@@ -793,13 +823,13 @@ async function fetchUsers() {
 }
 
 async function fetchTracks(playlistId) {
-  const res = await fetch(`${BASE_URL}/api/shared-playlists/${playlistId}/tracks`);
+  const res = await apiFetch(`${BASE_URL}/api/shared-playlists/${playlistId}/tracks`);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }
 
 async function fetchLinkedUsers(playlistId) {
-  const res = await fetch(`${BASE_URL}/api/shared-playlists/${playlistId}/linked-users`);
+  const res = await apiFetch(`${BASE_URL}/api/shared-playlists/${playlistId}/linked-users`);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }
@@ -956,7 +986,7 @@ async function handleCreateSubmit(e) {
   setLoadingBtn(btn, true);
 
   try {
-    const res = await fetch(`${BASE_URL}/api/shared-playlists`, {
+    const res = await apiFetch(`${BASE_URL}/api/shared-playlists`, {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify({ name, description: desc || undefined }),
@@ -999,7 +1029,7 @@ async function handleDelete(id, btn) {
   btn.textContent = 'Deleting…';
 
   try {
-    const res = await fetch(`${BASE_URL}/api/shared-playlists/${id}`, { method: 'DELETE' });
+    const res = await apiFetch(`${BASE_URL}/api/shared-playlists/${id}`, { method: 'DELETE' });
     if (!res.ok) {
       const d = await res.json().catch(() => ({}));
       throw new Error(d.error ?? `HTTP ${res.status}`);
