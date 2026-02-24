@@ -148,12 +148,12 @@ router.get('/tidal/playlists', async (req, res) => {
   if (!req.session.userId) return res.status(401).json({ error: 'Not signed in' });
 
   try {
-    const user        = db.getUser(req.session.userId);
+    const user = db.getUser(req.session.userId);
     if (!user) return res.status(401).json({ error: 'Not signed in' });
 
     let accessToken = decrypt(user.access_token_enc);
 
-    // Refresh if close to expiry
+    // Proactively refresh if close to expiry or already expired
     if (user.token_expires_at - Date.now() < 5 * 60 * 1000) {
       const tokens = await tidal.refreshTokens(decrypt(user.refresh_token_enc));
       db.upsertUser(user.user_id, user.display_name,
@@ -161,10 +161,26 @@ router.get('/tidal/playlists', async (req, res) => {
       accessToken = tokens.accessToken;
     }
 
-    const playlists = await tidal.tidalGetUserPlaylists(user.user_id, accessToken);
+    let playlists;
+    try {
+      playlists = await tidal.tidalGetUserPlaylists(user.user_id, accessToken);
+    } catch (err) {
+      if (err.message !== 'TIDAL_401') throw err;
+      // Token was stale despite the proactive check (e.g. clock skew) — force refresh and retry once
+      console.log(`[api] GET /tidal/playlists: got 401, refreshing token for user ${user.user_id}`);
+      const fresh  = db.getUser(req.session.userId);
+      const tokens = await tidal.refreshTokens(decrypt(fresh.refresh_token_enc));
+      db.upsertUser(fresh.user_id, fresh.display_name,
+        encrypt(tokens.accessToken), encrypt(tokens.refreshToken), tokens.expiresAt);
+      playlists = await tidal.tidalGetUserPlaylists(fresh.user_id, tokens.accessToken);
+    }
+
     res.json(playlists);
   } catch (err) {
     console.error('[api] GET /tidal/playlists:', err.message);
+    if (err.message === 'TIDAL_SESSION_DEAD') {
+      return res.status(401).json({ error: 'Tidal session expired — please sign out and sign in again' });
+    }
     res.status(500).json({ error: 'Failed to fetch playlists from Tidal' });
   }
 });
