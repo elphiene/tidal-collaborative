@@ -51,6 +51,7 @@ async function pollUser(user, broadcastFn) {
   try {
     // Refresh token if within 5 minutes of expiry
     if (user.token_expires_at - Date.now() < 5 * 60 * 1000) {
+      if (!user.refresh_token_enc) throw new Error('TIDAL_SESSION_DEAD');
       console.log(`[poller] refreshing token for user ${user.user_id}`);
       const refreshToken = decrypt(user.refresh_token_enc);
       const tokens       = await refreshTokens(refreshToken);
@@ -93,6 +94,7 @@ async function pollUser(user, broadcastFn) {
  */
 async function getAccessTokenForUser(user) {
   if (user.token_expires_at - Date.now() < 5 * 60 * 1000) {
+    if (!user.refresh_token_enc) throw new Error('TIDAL_SESSION_DEAD');
     const tokens = await refreshTokens(decrypt(user.refresh_token_enc));
     db.upsertUser(
       user.user_id, user.display_name,
@@ -100,6 +102,7 @@ async function getAccessTokenForUser(user) {
     );
     return tokens.accessToken;
   }
+  if (!user.access_token_enc) throw new Error('TIDAL_SESSION_DEAD');
   return decrypt(user.access_token_enc);
 }
 

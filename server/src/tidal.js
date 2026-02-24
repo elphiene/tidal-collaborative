@@ -44,8 +44,17 @@ async function tidalFetch(path, accessToken, options = {}) {
   if (res.status === 401) throw new Error('TIDAL_401');
 
   if (res.status === 429) {
-    const wait = res.headers.get('Retry-After') ?? '5';
-    throw new Error(`Tidal rate limit — retry after ${wait}s`);
+    const wait = parseInt(res.headers.get('Retry-After') ?? '5', 10);
+    console.warn(`[tidal] rate limited on ${path} — waiting ${wait}s then retrying`);
+    await new Promise((r) => setTimeout(r, wait * 1000));
+    try {
+      res = await fetch(url, { ...options, headers });
+    } catch (err) {
+      throw new Error(`Tidal network error on retry: ${err.message}`);
+    }
+    if (res.status === 429) {
+      throw new Error(`Tidal rate limit — still limited after retry`);
+    }
   }
 
   if (res.status === 204 || res.status === 202 || res.status === 201) return null;
@@ -183,6 +192,7 @@ async function tidalGetPlaylistTrackIds(playlistId, accessToken) {
     );
 
     const items = data?.data ?? [];
+    console.log(`[tidal] getPlaylistTrackIds ${playlistId}: offset=${offset} got ${items.length} items`);
     if (items.length === 0) break;
 
     for (const item of items) {
@@ -196,6 +206,7 @@ async function tidalGetPlaylistTrackIds(playlistId, accessToken) {
     offset += items.length;
   }
 
+  console.log(`[tidal] getPlaylistTrackIds ${playlistId}: total=${ids.size}`);
   return ids;
 }
 
