@@ -189,8 +189,11 @@ async function tidalGetPlaylistTrackIds(playlistId, accessToken) {
       if (item.id) ids.add(String(item.id));
     }
 
-    if (items.length < limit) break;
-    offset += limit;
+    // Only stop when Tidal returns an empty page. Do NOT break on
+    // items.length < limit — the API may enforce its own page size
+    // (e.g. 20) regardless of the limit parameter, which would cause
+    // premature termination and a hard cap at one page of results.
+    offset += items.length;
   }
 
   return ids;
