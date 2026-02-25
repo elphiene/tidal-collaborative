@@ -14,7 +14,10 @@ const {
 // Known track state — in-memory, reset on server start.
 // Map<tidalPlaylistId, Set<trackId>>
 // ---------------------------------------------------------------------------
-const knownTracks = new Map();
+const knownTracks  = new Map();
+// Progressive scan positions for large playlists.
+// Map<tidalPlaylistId, nextOffset> — 0 / absent means start from beginning.
+const scanOffsets  = new Map();
 
 let pollInProgress = false;
 
@@ -47,6 +50,7 @@ async function pollAll(broadcastFn) {
 
 async function pollUser(user, broadcastFn) {
   let accessToken;
+  console.log(`[poller] pollUser start: user=${user.user_id} tokenExpiresIn=${Math.round((user.token_expires_at - Date.now()) / 1000)}s`);
 
   try {
     // Refresh token if within 5 minutes of expiry
@@ -67,21 +71,20 @@ async function pollUser(user, broadcastFn) {
       accessToken = decrypt(user.access_token_enc);
     }
   } catch (err) {
-    if (err.message === 'TIDAL_SESSION_DEAD') {
-      console.warn(`[poller] session dead for user ${user.user_id} — removing user`);
-      db.deleteUser(user.user_id);
-    } else {
-      console.error(`[poller] token error for user ${user.user_id}: ${err.message}`);
-    }
+    console.warn(`[poller] token unusable for user ${user.user_id} (${err.message}) — removing user`);
+    db.deleteUser(user.user_id);
     return;
   }
 
   const links = db.getUserLinks(user.user_id);
+  console.log(`[poller] user=${user.user_id}: polling ${links.length} playlist(s)`);
 
   for (let i = 0; i < links.length; i++) {
     if (i > 0) await new Promise((r) => setTimeout(r, 500));
+    console.log(`[poller] user=${user.user_id}: starting playlist ${links[i].tidal_playlist_id}`);
     try {
       await pollPlaylist(links[i], user.user_id, accessToken, broadcastFn);
+      console.log(`[poller] user=${user.user_id}: finished playlist ${links[i].tidal_playlist_id}`);
     } catch (err) {
       console.error(
         `[poller] poll failed for user=${user.user_id} tidalPlaylist=${links[i].tidal_playlist_id}: ${err.message}`,
@@ -144,11 +147,17 @@ async function pollPlaylist(link, userId, accessToken, broadcastFn) {
   const tidalPlaylistId  = link.tidal_playlist_id;
   const sharedPlaylistId = link.shared_playlist_id;
 
-  const currentIds = await tidalGetPlaylistTrackIds(tidalPlaylistId, accessToken);
-  const known      = knownTracks.get(tidalPlaylistId) ?? new Set();
+  const startOffset   = scanOffsets.get(tidalPlaylistId) ?? 0;
+  const isPartialScan = startOffset > 0;
 
-  const added   = [...currentIds].filter((id) => !known.has(id));
-  const removed = [...known].filter((id) => !currentIds.has(id));
+  const { ids: currentIds, truncated, nextOffset } =
+    await tidalGetPlaylistTrackIds(tidalPlaylistId, accessToken, startOffset);
+
+  const known = knownTracks.get(tidalPlaylistId) ?? new Set();
+
+  const added = [...currentIds].filter((id) => !known.has(id));
+  // Only detect removals on a complete scan from the very beginning
+  const removed = (truncated || isPartialScan) ? [] : [...known].filter((id) => !currentIds.has(id));
 
   if (added.length > 0 || removed.length > 0) {
     console.log(
@@ -194,7 +203,21 @@ async function pollPlaylist(link, userId, accessToken, broadcastFn) {
     }
   }
 
-  knownTracks.set(tidalPlaylistId, currentIds);
+  // Always merge fetched IDs into known — only replace when we completed a full scan from offset 0
+  if (!truncated && !isPartialScan) {
+    knownTracks.set(tidalPlaylistId, currentIds);
+  } else {
+    const merged = knownTracks.get(tidalPlaylistId) ?? new Set();
+    for (const id of currentIds) merged.add(id);
+    knownTracks.set(tidalPlaylistId, merged);
+  }
+
+  // Advance (or reset) the scan position for next cycle
+  if (truncated) {
+    scanOffsets.set(tidalPlaylistId, nextOffset);
+  } else {
+    scanOffsets.delete(tidalPlaylistId);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -208,10 +231,23 @@ async function pollPlaylist(link, userId, accessToken, broadcastFn) {
  */
 let _broadcastFn = null;
 
+function seedKnownTracksFromDB() {
+  const users = db.getAllUsersWithLinks();
+  for (const user of users) {
+    const links = db.getUserLinks(user.user_id);
+    for (const link of links) {
+      const tracks = db.getPlaylistTracks(link.shared_playlist_id);
+      const ids = new Set(tracks.map((t) => String(t.tidal_track_id)));
+      knownTracks.set(link.tidal_playlist_id, ids);
+    }
+  }
+  console.log(`[poller] seeded knownTracks for ${knownTracks.size} playlist(s) from DB`);
+}
+
 function startPoller(broadcastFn, intervalMs = 60_000) {
   _broadcastFn = broadcastFn;
+  seedKnownTracksFromDB();
   console.log(`[poller] starting — interval ${intervalMs / 1000}s`);
-  // Initial poll shortly after startup to seed known state
   setTimeout(() => pollAll(broadcastFn).catch((err) => console.error('[poller]', err.message)), 5_000);
   setInterval(() => {
     pollAll(broadcastFn).catch((err) => console.error('[poller]', err.message));

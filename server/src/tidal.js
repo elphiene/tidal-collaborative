@@ -34,12 +34,20 @@ async function tidalFetch(path, accessToken, options = {}) {
     ...(options.headers ?? {}),
   };
 
-  let res;
-  try {
-    res = await fetch(url, { ...options, headers });
-  } catch (err) {
-    throw new Error(`Tidal network error: ${err.message}`);
+  async function attempt() {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 10_000);
+    try {
+      return await fetch(url, { ...options, headers, signal: controller.signal });
+    } catch (err) {
+      if (err.name === 'AbortError') throw new Error(`Tidal request timed out: ${path}`);
+      throw new Error(`Tidal network error: ${err.message}`);
+    } finally {
+      clearTimeout(timer);
+    }
   }
+
+  let res = await attempt();
 
   if (res.status === 401) throw new Error('TIDAL_401');
 
@@ -47,11 +55,7 @@ async function tidalFetch(path, accessToken, options = {}) {
     const wait = parseInt(res.headers.get('Retry-After') ?? '5', 10);
     console.warn(`[tidal] rate limited on ${path} — waiting ${wait}s then retrying`);
     await new Promise((r) => setTimeout(r, wait * 1000));
-    try {
-      res = await fetch(url, { ...options, headers });
-    } catch (err) {
-      throw new Error(`Tidal network error on retry: ${err.message}`);
-    }
+    res = await attempt();
     if (res.status === 429) {
       throw new Error(`Tidal rate limit — still limited after retry`);
     }
@@ -81,17 +85,28 @@ async function tidalFetch(path, accessToken, options = {}) {
  * Returns { accessToken, refreshToken, expiresAt }
  */
 async function exchangeCode(code, codeVerifier, redirectUri) {
-  const res = await fetch(TIDAL_AUTH_TOKEN, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      grant_type:    'authorization_code',
-      client_id:     getClientId(),
-      code,
-      redirect_uri:  redirectUri,
-      code_verifier: codeVerifier,
-    }),
-  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10_000);
+  let res;
+  try {
+    res = await fetch(TIDAL_AUTH_TOKEN, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type:    'authorization_code',
+        client_id:     getClientId(),
+        code,
+        redirect_uri:  redirectUri,
+        code_verifier: codeVerifier,
+      }),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    if (err.name === 'AbortError') throw new Error('Token exchange timed out');
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
 
   if (!res.ok) {
     const body = await res.text().catch(() => '');
@@ -108,15 +123,26 @@ async function exchangeCode(code, codeVerifier, redirectUri) {
  * Throws on 400/401 (session dead — user must re-authenticate).
  */
 async function refreshTokens(refreshToken) {
-  const res = await fetch(TIDAL_AUTH_TOKEN, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      grant_type:    'refresh_token',
-      client_id:     getClientId(),
-      refresh_token: refreshToken,
-    }),
-  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10_000);
+  let res;
+  try {
+    res = await fetch(TIDAL_AUTH_TOKEN, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type:    'refresh_token',
+        client_id:     getClientId(),
+        refresh_token: refreshToken,
+      }),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    if (err.name === 'AbortError') throw new Error('Token refresh timed out');
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
 
   if (!res.ok) {
     const body = await res.text().catch(() => '');
@@ -176,13 +202,17 @@ async function tidalGetUserPlaylists(userId, accessToken) {
 }
 
 /**
- * Get all track IDs in a playlist as a Set<string>.
- * Handles pagination (100 per page).
+ * Get track IDs from a playlist starting at startOffset.
+ * Returns { ids: Set<string>, truncated: boolean, nextOffset: number }.
+ * Stops after MAX_PAGES pages — caller should resume from nextOffset next cycle.
  */
-async function tidalGetPlaylistTrackIds(playlistId, accessToken) {
+const MAX_PAGES = 50; // ~1 000 tracks at Tidal's ~20/page page size
+
+async function tidalGetPlaylistTrackIds(playlistId, accessToken, startOffset = 0) {
   const ids    = new Set();
-  let   offset = 0;
+  let   offset = startOffset;
   const limit  = 100;
+  let   pages  = 0;
 
   while (true) {
     const data = await tidalFetch(
@@ -192,23 +222,23 @@ async function tidalGetPlaylistTrackIds(playlistId, accessToken) {
     );
 
     const items = data?.data ?? [];
-    if (items.length === 0) break;
+    if (items.length === 0) return { ids, truncated: false, nextOffset: 0 };
 
     for (const item of items) {
       if (item.id) ids.add(String(item.id));
     }
 
-    // Only stop when Tidal returns an empty page. Do NOT break on
-    // items.length < limit — the API may enforce its own page size
-    // (e.g. 20) regardless of the limit parameter, which would cause
-    // premature termination and a hard cap at one page of results.
+    pages++;
     offset += items.length;
 
-    // Brief pause between pages to avoid bursting into Tidal's rate limit
-    await new Promise((r) => setTimeout(r, 300));
-  }
+    if (pages >= MAX_PAGES) {
+      console.log(`[tidal] ${playlistId}: pausing scan at offset ${offset} (${ids.size} IDs this chunk) — will continue next cycle`);
+      return { ids, truncated: true, nextOffset: offset };
+    }
 
-  return ids;
+    // Brief pause between pages to avoid bursting into Tidal's rate limit
+    await new Promise((r) => setTimeout(r, 150));
+  }
 }
 
 /**
