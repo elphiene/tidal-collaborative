@@ -1,6 +1,6 @@
 # Tidal Collaborative
 
-Self-hosted real-time collaborative playlist sync for [Tidal](https://tidal.com). Sign in with your Tidal account in any browser, link a playlist, and every change — adds, removes — propagates to all collaborators automatically. No browser extension required.
+Self-hosted real-time collaborative playlist sync for [Tidal](https://tidal.com). Sign in with your Tidal account in any browser, link a playlist, and every change — adds, removes — propagates to all collaborators automatically.
 
 ---
 
@@ -38,7 +38,7 @@ Server (Docker / home lab)
 | Docker | Engine 24+ with Compose plugin v2+ |
 | RAM | ≥ 128 MB free |
 | Disk | ≥ 100 MB (image + DB) |
-| Browser | Any modern browser (no extension needed) |
+| Browser | Any modern browser |
 | Network | Users must be on the home LAN or connected via VPN |
 | Tidal | Account registered at [developer.tidal.com](https://developer.tidal.com) |
 
@@ -51,8 +51,6 @@ You need a free Tidal developer application to enable sign-in. The setup wizard 
 1. Go to [developer.tidal.com](https://developer.tidal.com) and create an application
 2. Add the Redirect URI shown by the wizard
 3. Paste the **Client ID** into the wizard
-
-No manual config file editing required.
 
 ---
 
