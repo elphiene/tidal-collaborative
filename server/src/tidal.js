@@ -202,41 +202,45 @@ async function tidalGetUserPlaylists(userId, accessToken) {
 }
 
 /**
- * Get track IDs from a playlist starting at startOffset.
- * Returns { ids: Set<string>, truncated: boolean, nextOffset: number }.
- * Stops after MAX_PAGES pages — caller should resume from nextOffset next cycle.
+ * Get track IDs from a playlist, using cursor-based pagination.
+ * Tidal ignores the offset parameter — pagination must follow links.next.
+ * Returns { ids: Set<string>, truncated: boolean, nextCursor: string|null }.
+ * Stops after MAX_PAGES pages — caller should resume from nextCursor next cycle.
  */
-const MAX_PAGES = 50; // ~1 000 tracks at Tidal's ~20/page page size
+const MAX_PAGES = 50;
 
-async function tidalGetPlaylistTrackIds(playlistId, accessToken, startOffset = 0) {
-  const ids    = new Set();
-  let   offset = startOffset;
-  const limit  = 100;
-  let   pages  = 0;
+async function tidalGetPlaylistTrackIds(playlistId, accessToken, startCursor = null) {
+  const ids  = new Set();
+  let   path = startCursor ?? `/playlists/${playlistId}/relationships/items?limit=100`;
+  let   pages = 0;
 
   while (true) {
-    const data = await tidalFetch(
-      `/playlists/${playlistId}/relationships/items?limit=${limit}&offset=${offset}`,
-      accessToken,
-      { method: 'GET' },
-    );
-
+    const data  = await tidalFetch(path, accessToken, { method: 'GET' });
     const items = data?.data ?? [];
-    if (items.length === 0) return { ids, truncated: false, nextOffset: 0 };
 
+    if (items.length === 0) return { ids, truncated: false, nextCursor: null };
+
+    const sizeBefore = ids.size;
     for (const item of items) {
       if (item.id) ids.add(String(item.id));
     }
 
-    pages++;
-    offset += items.length;
+    // No new IDs added — Tidal is looping, treat as end of playlist.
+    if (ids.size === sizeBefore) return { ids, truncated: false, nextCursor: null };
 
+    // Cursor is nested at links.meta.nextCursor (not top-level meta).
+    // Build next URL without offset param, which conflicts with and overrides the cursor.
+    const nextCursorToken = data?.links?.meta?.nextCursor ?? null;
+    if (!nextCursorToken) return { ids, truncated: false, nextCursor: null };
+
+    pages++;
+    const nextPath = `/playlists/${playlistId}/relationships/items?limit=100&page%5Bcursor%5D=${encodeURIComponent(nextCursorToken)}`;
     if (pages >= MAX_PAGES) {
-      console.log(`[tidal] ${playlistId}: pausing scan at offset ${offset} (${ids.size} IDs this chunk) — will continue next cycle`);
-      return { ids, truncated: true, nextOffset: offset };
+      console.log(`[tidal] ${playlistId}: pausing scan at ${ids.size} IDs — will continue next cycle`);
+      return { ids, truncated: true, nextCursor: nextPath };
     }
 
-    // Brief pause between pages to avoid bursting into Tidal's rate limit
+    path = nextPath;
     await new Promise((r) => setTimeout(r, 150));
   }
 }
@@ -259,6 +263,32 @@ async function tidalRemoveTrack(playlistId, trackId, accessToken) {
     method: 'DELETE',
     body:   JSON.stringify({ data: [{ id: String(trackId), type: 'tracks' }] }),
   });
+}
+
+/**
+ * Get raw track ID list (including duplicates) for a playlist.
+ * Unlike tidalGetPlaylistTrackIds (which builds a Set), this returns an array
+ * so duplicate IDs are preserved — used for deduplication.
+ */
+async function tidalGetPlaylistTrackList(playlistId, accessToken) {
+  const ids  = [];
+  let   path = `/playlists/${playlistId}/relationships/items?limit=100`;
+
+  while (true) {
+    const data  = await tidalFetch(path, accessToken, { method: 'GET' });
+    const items = data?.data ?? [];
+    if (items.length === 0) break;
+    const countBefore = ids.length;
+    for (const item of items) {
+      if (item.id) ids.push(String(item.id));
+    }
+    if (ids.length === countBefore) break;
+    const nextCursorToken = data?.links?.meta?.nextCursor ?? null;
+    if (!nextCursorToken) break;
+    path = `/playlists/${playlistId}/relationships/items?limit=100&page%5Bcursor%5D=${encodeURIComponent(nextCursorToken)}`;
+    await new Promise((r) => setTimeout(r, 150));
+  }
+  return ids; // may contain duplicates
 }
 
 /**
@@ -330,6 +360,7 @@ module.exports = {
   fetchUserProfile,
   tidalGetUserPlaylists,
   tidalGetPlaylistTrackIds,
+  tidalGetPlaylistTrackList,
   tidalAddTrack,
   tidalRemoveTrack,
   tidalGetTrackInfo,

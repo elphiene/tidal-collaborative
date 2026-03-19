@@ -18,19 +18,39 @@ const state = {
   displayName:  null,
   signedIn:     false,
 
-  // Current view: 'signed-out' | 'my-playlists' | 'admin'
+  // Current view: 'signed-out' | 'my-playlists' | 'discover' | 'users' | 'admin'
   view: 'signed-out',
 
   // Admin data
   playlists: [],
   users:     [],
 
-  // My links
-  myLinks: [],
+  // Users view data
+  allUsers:      [],
+  usersViewTimer: null,
 
-  // Link modal state
-  selectedTidalPlaylist: null, // { id, name }
-  selectedSharedPlaylist: null, // { id, name }
+  // My playlists (split by ownership)
+  ownedLinks:  [],
+  joinedLinks: [],
+
+  // Discover
+  discoverPlaylists: [],
+
+  // Create modal
+  createStep:          1,
+  createVisibility:    'private',
+  createSelectedTidal: null,  // { id, name }
+
+  // Join modal (Discover tab)
+  joinTargetPlaylist: null,  // { id, name }
+  joinSelectedTidal:  null,  // { id, name }
+
+  // Invite link modal (join via ?invite= param)
+  resolvedInvite:   null,    // { sharedPlaylistId, sharedPlaylistName }
+  linkSelectedTidal: null,   // { id, name }
+
+  // Invites management modal
+  currentInvitesPlaylistId: null,
 
   // WS
   ws:                 null,
@@ -44,11 +64,6 @@ const state = {
 // API fetch wrapper
 // ---------------------------------------------------------------------------
 
-/**
- * Wrapper around fetch for all /api/* calls.
- * If the server returns 401 while the user is signed in, tears down the
- * session locally and shows the sign-in screen (token expired / revoked).
- */
 async function apiFetch(url, opts) {
   const res = await fetch(url, opts);
   if (res.status === 401 && state.signedIn) {
@@ -62,6 +77,8 @@ async function apiFetch(url, opts) {
     }
     clearInterval(state.pollTimer);
     clearInterval(state.sessionCheckTimer);
+    clearInterval(state.usersViewTimer);
+    state.usersViewTimer = null;
     showSignedOut();
     toast('Your session has expired — please sign in again.', 'error');
   }
@@ -73,8 +90,15 @@ async function apiFetch(url, opts) {
 // ---------------------------------------------------------------------------
 
 document.addEventListener('DOMContentLoaded', async () => {
-  // Handle OAuth redirect query params
+  // Check for invite code BEFORE auth redirect cleanup
   const params = new URLSearchParams(window.location.search);
+  const inviteCode = params.get('invite');
+  if (inviteCode) {
+    sessionStorage.setItem('pending_invite', inviteCode.toUpperCase());
+    history.replaceState({}, '', window.location.pathname);
+  }
+
+  // Handle OAuth redirect query params
   if (params.has('auth')) {
     const result = params.get('auth');
     if (result === 'ok') {
@@ -83,19 +107,18 @@ document.addEventListener('DOMContentLoaded', async () => {
       const reason = params.get('reason') ?? 'Unknown error';
       toast(`Sign-in failed: ${reason}`, 'error');
     }
-    // Clean up URL
     history.replaceState({}, '', '/');
   }
 
   // Wire up static event listeners
   document.getElementById('signin-btn').addEventListener('click', handleSignIn);
   document.getElementById('signout-btn').addEventListener('click', handleSignOut);
-  document.getElementById('open-link-btn').addEventListener('click', openLinkModal);
-  document.getElementById('open-create-btn').addEventListener('click', () => openModal('create-modal'));
+  document.getElementById('open-create-btn').addEventListener('click', openCreateModal);
   document.getElementById('refresh-btn').addEventListener('click', () => {
     refreshAdmin();
     toast('Refreshed', 'info');
   });
+  document.getElementById('refresh-discover-btn').addEventListener('click', fetchDiscover);
 
   // Navigation tabs
   document.querySelectorAll('.nav-tab').forEach((btn) => {
@@ -105,12 +128,25 @@ document.addEventListener('DOMContentLoaded', async () => {
   // PIN inputs (modal)
   initPinInputs();
 
-  // Link modal controls
-  document.getElementById('link-next-btn').addEventListener('click', handleLinkNext);
-  document.getElementById('link-back-btn').addEventListener('click', handleLinkBack);
+  // Create modal controls
+  document.getElementById('create-name').addEventListener('input', () => {
+    document.getElementById('create-next-btn').disabled =
+      !document.getElementById('create-name').value.trim();
+  });
+  document.querySelectorAll('input[name="create-visibility"]').forEach((radio) => {
+    radio.addEventListener('change', (e) => { state.createVisibility = e.target.value; });
+  });
+  document.getElementById('create-next-btn').addEventListener('click', handleCreateNext);
+  document.getElementById('create-back-btn').addEventListener('click', handleCreateBack);
 
-  // Create form
-  document.getElementById('create-form').addEventListener('submit', handleCreateSubmit);
+  // Join modal (Discover)
+  document.getElementById('join-confirm-btn').addEventListener('click', handleJoinConfirm);
+
+  // Invite link modal (join via invite code)
+  document.getElementById('link-confirm-btn').addEventListener('click', handleLinkConfirm);
+
+  // Invites management modal
+  document.getElementById('generate-invite-btn').addEventListener('click', handleGenerateInvite);
 
   // Modal close buttons (data-close="<modal-id>")
   document.querySelectorAll('[data-close]').forEach((btn) => {
@@ -130,6 +166,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.querySelectorAll('.modal-overlay.modal-open').forEach((m) => closeModal(m.id));
   });
 
+  // Show server version in header
+  apiFetch(`${BASE_URL}/api/ping`).then((r) => r.json()).then((d) => {
+    if (d.version) document.getElementById('app-version').textContent = `v${d.version}`;
+  }).catch(() => {});
+
   // Run setup wizard check — calls checkAuth() when complete
   await initSetupWizard();
 });
@@ -141,8 +182,6 @@ document.addEventListener('DOMContentLoaded', async () => {
 async function initSetupWizard() {
   const overlay = document.getElementById('setup-overlay');
 
-  // Wire up controls and show step 1 spinner BEFORE the fetch so the
-  // overlay is covering the page from the very first paint.
   document.getElementById('setup-next-btn').addEventListener('click', handleSetupNext);
   document.getElementById('setup-copy-uri').addEventListener('click', handleSetupCopy);
   initSetupPinInputs();
@@ -157,13 +196,11 @@ async function initSetupWizard() {
   }
 
   if (status.complete) {
-    // Already set up — remove overlay immediately and run normal app init.
     overlay.remove();
     await checkAuth();
     return;
   }
 
-  // Show step 1 success state briefly, then advance to the right step.
   const statusEl = document.getElementById('setup-step-1-status');
   if (statusEl) statusEl.innerHTML = '<div class="setup-check">✓</div>';
 
@@ -178,13 +215,11 @@ async function initSetupWizard() {
 }
 
 function goToSetupStep(n) {
-  // Show/hide steps
   for (let i = 1; i <= 4; i++) {
     const el = document.getElementById(`setup-step-${i}`);
     if (el) el.hidden = (i !== n);
   }
 
-  // Update progress dots (fill up to step n-1 since step 1 is auto)
   document.querySelectorAll('.setup-dot').forEach((dot) => {
     const dotStep = parseInt(dot.dataset.step, 10);
     dot.classList.toggle('active', dotStep <= Math.max(n - 1, 1));
@@ -203,7 +238,6 @@ function goToSetupStep(n) {
     clientInput.addEventListener('input', () => {
       nextBtn.disabled = !clientInput.value.trim();
     });
-    // Focus the input
     setTimeout(() => clientInput.focus(), 60);
   } else if (n === 3) {
     nextBtn.hidden   = false;
@@ -240,7 +274,6 @@ function handleSetupCopy() {
 async function handleSetupNext() {
   const nextBtn = document.getElementById('setup-next-btn');
 
-  // Determine current step from which step is visible
   let currentStep = 2;
   for (let i = 2; i <= 4; i++) {
     const el = document.getElementById(`setup-step-${i}`);
@@ -300,7 +333,6 @@ async function handleSetupNext() {
     }
 
   } else if (currentStep === 4) {
-    // Remove overlay and start normal app
     document.getElementById('setup-overlay').remove();
     await checkAuth();
   }
@@ -389,6 +421,8 @@ async function handleSignOut() {
   }
   clearInterval(state.pollTimer);
   clearInterval(state.sessionCheckTimer);
+  clearInterval(state.usersViewTimer);
+  state.usersViewTimer = null;
   showSignedOut();
 }
 
@@ -399,20 +433,33 @@ async function handleSignOut() {
 function showSignedOut() {
   document.getElementById('signed-out-view').hidden   = false;
   document.getElementById('my-playlists-view').hidden = true;
+  document.getElementById('discover-view').hidden     = true;
+  document.getElementById('users-view').hidden        = true;
   document.getElementById('admin-view').hidden        = true;
   document.getElementById('nav-tabs').hidden          = true;
+  document.getElementById('tab-discover').hidden      = true;
   document.getElementById('user-display').hidden      = true;
   document.getElementById('signout-btn').hidden       = true;
+  clearInterval(state.usersViewTimer);
+  state.usersViewTimer = null;
   setWsStatus(false);
 }
 
 function showSignedIn() {
   document.getElementById('signed-out-view').hidden = true;
   document.getElementById('nav-tabs').hidden        = false;
+  document.getElementById('tab-discover').hidden    = false;
   const userDisplay = document.getElementById('user-display');
   userDisplay.textContent = state.displayName ?? state.userId;
   userDisplay.hidden      = false;
   document.getElementById('signout-btn').hidden = false;
+
+  // Check for pending invite from ?invite= URL param (survived OAuth redirect)
+  const pendingInvite = sessionStorage.getItem('pending_invite');
+  if (pendingInvite) {
+    sessionStorage.removeItem('pending_invite');
+    setTimeout(() => openInviteLinkModal(pendingInvite), 400);
+  }
 
   switchView('my-playlists');
   connectWebSocket();
@@ -423,7 +470,12 @@ function showSignedIn() {
 async function switchView(viewName) {
   if (viewName === 'admin') {
     const ok = await ensureAdminAuthed();
-    if (!ok) return; // PIN modal shown; view switch happens after successful auth
+    if (!ok) return;
+  }
+
+  if (state.view === 'users' && viewName !== 'users') {
+    clearInterval(state.usersViewTimer);
+    state.usersViewTimer = null;
   }
 
   state.view = viewName;
@@ -433,10 +485,17 @@ async function switchView(viewName) {
   });
 
   document.getElementById('my-playlists-view').hidden = viewName !== 'my-playlists';
+  document.getElementById('discover-view').hidden     = viewName !== 'discover';
+  document.getElementById('users-view').hidden        = viewName !== 'users';
   document.getElementById('admin-view').hidden        = viewName !== 'admin';
 
   if (viewName === 'my-playlists') {
-    fetchMyLinks();
+    fetchMyPlaylists();
+  } else if (viewName === 'discover') {
+    fetchDiscover();
+  } else if (viewName === 'users') {
+    fetchAllUsers();
+    state.usersViewTimer = setInterval(fetchAllUsers, 30_000);
   } else if (viewName === 'admin') {
     refreshAdmin();
   }
@@ -479,29 +538,23 @@ function openPinModal(pinSet) {
   submitBtn.disabled = true;
   submitBtn.dataset.pinSet = pinSet ? '1' : '0';
 
-  // Clear inputs
   document.querySelectorAll('#pin-inputs .pin-digit').forEach((el) => { el.value = ''; });
 
   openModal('pin-modal');
-
-  // Focus first digit after modal opens
-  setTimeout(() => document.querySelector('.pin-digit')?.focus(), 60);
+  setTimeout(() => document.querySelector('#pin-inputs .pin-digit')?.focus(), 60);
 }
 
 function getPinValue() {
   return [...document.querySelectorAll('#pin-inputs .pin-digit')].map((el) => el.value).join('');
 }
 
-// Wire up PIN digit inputs for the admin PIN modal (called once on DOMContentLoaded)
 function initPinInputs() {
   const digits  = [...document.querySelectorAll('#pin-inputs .pin-digit')];
   const submitBtn = document.getElementById('pin-submit-btn');
 
   digits.forEach((input, i) => {
     input.addEventListener('input', () => {
-      // Only allow single digit
       input.value = input.value.replace(/\D/g, '').slice(-1);
-      // Auto-advance
       if (input.value && i < digits.length - 1) digits[i + 1].focus();
       submitBtn.disabled = getPinValue().length !== 4;
     });
@@ -513,7 +566,6 @@ function initPinInputs() {
       if (e.key === 'Enter' && !submitBtn.disabled) submitBtn.click();
     });
 
-    // Select on focus so typing replaces the digit
     input.addEventListener('focus', () => input.select());
   });
 
@@ -541,7 +593,6 @@ async function handlePinSubmit() {
     if (!res.ok) {
       errEl.textContent = data.error ?? 'Incorrect PIN';
       errEl.hidden      = false;
-      // Clear inputs and refocus
       document.querySelectorAll('#pin-inputs .pin-digit').forEach((el) => { el.value = ''; });
       submitBtn.disabled = true;
       document.querySelector('#pin-inputs .pin-digit')?.focus();
@@ -549,12 +600,15 @@ async function handlePinSubmit() {
     }
 
     closeModal('pin-modal');
-    // Now actually switch to admin view
+    clearInterval(state.usersViewTimer);
+    state.usersViewTimer = null;
     state.view = 'admin';
     document.querySelectorAll('.nav-tab').forEach((btn) => {
       btn.classList.toggle('nav-tab-active', btn.dataset.view === 'admin');
     });
     document.getElementById('my-playlists-view').hidden = true;
+    document.getElementById('discover-view').hidden     = true;
+    document.getElementById('users-view').hidden        = true;
     document.getElementById('admin-view').hidden        = false;
     refreshAdmin();
   } catch (err) {
@@ -569,36 +623,146 @@ async function handlePinSubmit() {
 // My Playlists view
 // ---------------------------------------------------------------------------
 
-async function fetchMyLinks() {
+async function fetchMyPlaylists() {
   try {
-    const res = await apiFetch(`${BASE_URL}/api/links`);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    state.myLinks = await res.json();
-    renderMyLinks();
+    const [linksRes, playlistsRes] = await Promise.all([
+      apiFetch(`${BASE_URL}/api/links`),
+      apiFetch(`${BASE_URL}/api/shared-playlists`),
+    ]);
+
+    if (!linksRes.ok) throw new Error(`HTTP ${linksRes.status}`);
+    if (!playlistsRes.ok) throw new Error(`HTTP ${playlistsRes.status}`);
+
+    const links     = await linksRes.json();
+    const playlists = await playlistsRes.json();
+
+    state.ownedLinks  = links.filter((l) => l.playlist_created_by === state.userId);
+    state.joinedLinks = links.filter((l) => l.playlist_created_by !== state.userId);
+
+    // Owned playlists with no link yet (edge case)
+    const linkedSharedIds = new Set(links.map((l) => l.shared_playlist_id));
+    const unlinkedOwned   = playlists.filter(
+      (p) => p.created_by === state.userId && !linkedSharedIds.has(p.id),
+    );
+
+    renderOwnedPlaylists(state.ownedLinks, unlinkedOwned);
+    renderJoinedPlaylists(state.joinedLinks);
   } catch (err) {
-    console.error('[app] fetchMyLinks:', err.message);
-    document.getElementById('my-links-list').innerHTML = `
-      <div class="empty-state">
-        <p class="empty-title">Failed to load links</p>
-        <p class="empty-sub">${escHtml(err.message)}</p>
-      </div>`;
+    console.error('[app] fetchMyPlaylists:', err.message);
+    const errHtml = `<div class="empty-state"><p class="empty-title">Failed to load playlists</p><p class="empty-sub">${escHtml(err.message)}</p></div>`;
+    document.getElementById('owned-playlists-list').innerHTML  = errHtml;
+    document.getElementById('joined-playlists-list').innerHTML = errHtml;
   }
 }
 
-function renderMyLinks() {
-  const el = document.getElementById('my-links-list');
+function renderOwnedPlaylists(links, unlinked) {
+  const el = document.getElementById('owned-playlists-list');
 
-  if (state.myLinks.length === 0) {
+  if (links.length === 0 && unlinked.length === 0) {
     el.innerHTML = `
       <div class="empty-state">
-        <div class="empty-icon">🔗</div>
-        <p class="empty-title">No playlists linked yet</p>
-        <p class="empty-sub">Click <strong>Link Playlist</strong> to connect one of your Tidal playlists to a shared playlist.</p>
+        <div class="empty-icon">🎵</div>
+        <p class="empty-title">No playlists yet</p>
+        <p class="empty-sub">Click <strong>New Playlist</strong> to create your first one.</p>
       </div>`;
     return;
   }
 
-  el.innerHTML = state.myLinks.map((link) => `
+  const linkedCards = links.map((link) => {
+    const isPrivate = !link.playlist_is_public;
+    const visBadge  = isPrivate
+      ? '<span class="badge-private">🔒 Private</span>'
+      : '<span class="badge-public">🌍 Public</span>';
+    const visBtn = isPrivate
+      ? `<button class="btn btn-ghost btn-sm btn-xs" data-toggle-vis="${link.shared_playlist_id}" data-is-public="0">Make Public</button>`
+      : `<button class="btn btn-ghost btn-sm btn-xs" data-toggle-vis="${link.shared_playlist_id}" data-is-public="1">Make Private</button>`;
+    const inviteBtn = isPrivate
+      ? `<button class="btn btn-ghost btn-sm btn-xs" data-invites="${link.shared_playlist_id}" data-invites-name="${escHtml(link.shared_playlist_name)}">Invite Link</button>`
+      : '';
+
+    return `
+      <div class="link-card">
+        <div class="link-card-body">
+          <div class="link-arrow">
+            <span class="link-name shared-name">${escHtml(link.shared_playlist_name)}</span>
+            ${visBadge}
+          </div>
+          <div class="link-arrow">
+            <span class="link-name tidal-name">${escHtml(link.tidal_playlist_name || link.tidal_playlist_id)}</span>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+            <span class="link-name" style="color:var(--text-muted)">syncing</span>
+          </div>
+          <p class="link-meta">Linked ${formatDate(link.created_at)}</p>
+        </div>
+        <div class="link-card-actions" style="flex-wrap:wrap;gap:0.35rem">
+          <button class="btn btn-secondary btn-sm btn-xs" data-sync="${link.id}">Sync</button>
+          ${inviteBtn}
+          ${visBtn}
+          <button class="btn btn-danger btn-sm btn-xs" data-delete-pl="${link.shared_playlist_id}" data-delete-pl-name="${escHtml(link.shared_playlist_name)}" data-armed="false">Delete</button>
+        </div>
+      </div>`;
+  });
+
+  const unlinkedCards = unlinked.map((pl) => {
+    const isPrivate = !pl.is_public;
+    const visBadge  = isPrivate
+      ? '<span class="badge-private">🔒 Private</span>'
+      : '<span class="badge-public">🌍 Public</span>';
+    const visBtn = isPrivate
+      ? `<button class="btn btn-ghost btn-sm btn-xs" data-toggle-vis="${pl.id}" data-is-public="0">Make Public</button>`
+      : `<button class="btn btn-ghost btn-sm btn-xs" data-toggle-vis="${pl.id}" data-is-public="1">Make Private</button>`;
+    const inviteBtn = isPrivate
+      ? `<button class="btn btn-ghost btn-sm btn-xs" data-invites="${pl.id}" data-invites-name="${escHtml(pl.name)}">Invite Link</button>`
+      : '';
+    return `
+      <div class="link-card">
+        <div class="link-card-body">
+          <div class="link-arrow">
+            <span class="link-name shared-name">${escHtml(pl.name)}</span>
+            ${visBadge}
+          </div>
+          <p class="link-meta">Not linked to a Tidal playlist · Created ${formatDate(pl.created_at)}</p>
+        </div>
+        <div class="link-card-actions" style="flex-wrap:wrap;gap:0.35rem">
+          ${inviteBtn}
+          ${visBtn}
+          <button class="btn btn-danger btn-sm btn-xs" data-delete-pl="${pl.id}" data-delete-pl-name="${escHtml(pl.name)}" data-armed="false">Delete</button>
+        </div>
+      </div>`;
+  });
+
+  el.innerHTML = [...linkedCards, ...unlinkedCards].join('');
+
+  el.querySelectorAll('[data-sync]').forEach((btn) => {
+    btn.addEventListener('click', () => handleSync(parseInt(btn.dataset.sync, 10), btn));
+  });
+  el.querySelectorAll('[data-invites]').forEach((btn) => {
+    btn.addEventListener('click', () =>
+      openInvitesModal(parseInt(btn.dataset.invites, 10), btn.dataset.invitesName));
+  });
+  el.querySelectorAll('[data-toggle-vis]').forEach((btn) => {
+    btn.addEventListener('click', () =>
+      handleToggleVisibility(parseInt(btn.dataset.toggleVis, 10), btn.dataset.isPublic === '1', btn));
+  });
+  el.querySelectorAll('[data-delete-pl]').forEach((btn) => {
+    btn.addEventListener('click', () =>
+      handleDeletePlaylist(parseInt(btn.dataset.deletePl, 10), btn.dataset.deletePlName, btn));
+  });
+}
+
+function renderJoinedPlaylists(links) {
+  const el = document.getElementById('joined-playlists-list');
+
+  if (links.length === 0) {
+    el.innerHTML = `
+      <div class="empty-state">
+        <p class="empty-title">No joined playlists</p>
+        <p class="empty-sub">Browse the <strong>Discover</strong> tab or use an invite link to join a playlist.</p>
+      </div>`;
+    return;
+  }
+
+  el.innerHTML = links.map((link) => `
     <div class="link-card">
       <div class="link-card-body">
         <div class="link-arrow">
@@ -611,10 +775,14 @@ function renderMyLinks() {
         <p class="link-meta">Linked ${formatDate(link.created_at)}</p>
       </div>
       <div class="link-card-actions">
+        <button class="btn btn-secondary btn-sm" data-sync="${link.id}">Sync</button>
         <button class="btn btn-danger btn-sm" data-unlink="${link.id}" data-armed="false">Unlink</button>
       </div>
     </div>`).join('');
 
+  el.querySelectorAll('[data-sync]').forEach((btn) => {
+    btn.addEventListener('click', () => handleSync(parseInt(btn.dataset.sync, 10), btn));
+  });
   el.querySelectorAll('[data-unlink]').forEach((btn) => {
     btn.addEventListener('click', () => handleUnlink(parseInt(btn.dataset.unlink, 10), btn));
   });
@@ -643,7 +811,7 @@ async function handleUnlink(linkId, btn) {
       throw new Error(d.error ?? `HTTP ${res.status}`);
     }
     toast('Playlist unlinked', 'info');
-    await fetchMyLinks();
+    await fetchMyPlaylists();
   } catch (err) {
     toast(`Unlink failed: ${err.message}`, 'error');
     btn.disabled      = false;
@@ -652,25 +820,475 @@ async function handleUnlink(linkId, btn) {
   }
 }
 
+async function handleSync(linkId, btn) {
+  btn.disabled    = true;
+  btn.textContent = 'Syncing…';
+
+  try {
+    const res = await apiFetch(`${BASE_URL}/api/links/${linkId}/sync`, { method: 'POST' });
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}));
+      throw new Error(d.error ?? `HTTP ${res.status}`);
+    }
+    const { added, merged, duplicatesFixed } = await res.json();
+
+    if (added === 0 && merged === 0 && duplicatesFixed === 0) {
+      toast('Already in sync', 'info');
+    } else {
+      const parts = [];
+      if (added > 0)           parts.push(`+${added} added to playlist`);
+      if (merged > 0)          parts.push(`+${merged} merged to server`);
+      if (duplicatesFixed > 0) parts.push(`${duplicatesFixed} dupes fixed`);
+      toast(`Synced: ${parts.join(', ')}`, 'success');
+    }
+  } catch (err) {
+    toast(`Sync failed: ${err.message}`, 'error');
+  } finally {
+    btn.disabled    = false;
+    btn.textContent = 'Sync';
+  }
+}
+
+async function handleDeletePlaylist(id, name, btn) {
+  if (btn.dataset.armed !== 'true') {
+    btn.dataset.armed = 'true';
+    btn.textContent   = 'Confirm?';
+    setTimeout(() => {
+      if (btn.dataset.armed === 'true') {
+        btn.dataset.armed = 'false';
+        btn.textContent   = 'Delete';
+      }
+    }, 3000);
+    return;
+  }
+
+  btn.disabled    = true;
+  btn.textContent = 'Deleting…';
+
+  try {
+    const res = await apiFetch(`${BASE_URL}/api/shared-playlists/${id}`, { method: 'DELETE' });
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}));
+      throw new Error(d.error ?? `HTTP ${res.status}`);
+    }
+    toast(`"${name}" deleted`, 'info');
+    await fetchMyPlaylists();
+  } catch (err) {
+    toast(`Delete failed: ${err.message}`, 'error');
+    btn.disabled      = false;
+    btn.textContent   = 'Delete';
+    btn.dataset.armed = 'false';
+  }
+}
+
+async function handleToggleVisibility(id, currentlyPublic, btn) {
+  const newIsPublic = !currentlyPublic;
+  btn.disabled = true;
+
+  try {
+    const res = await apiFetch(`${BASE_URL}/api/shared-playlists/${id}`, {
+      method:  'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ isPublic: newIsPublic }),
+    });
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}));
+      throw new Error(d.error ?? `HTTP ${res.status}`);
+    }
+    toast(newIsPublic ? 'Playlist is now public' : 'Playlist is now private', 'success');
+    await fetchMyPlaylists();
+  } catch (err) {
+    toast(`Failed to update visibility: ${err.message}`, 'error');
+    btn.disabled = false;
+  }
+}
+
 // ---------------------------------------------------------------------------
-// Link Playlist Modal
+// Discover view
 // ---------------------------------------------------------------------------
 
-async function openLinkModal() {
-  state.selectedTidalPlaylist  = null;
-  state.selectedSharedPlaylist = null;
+async function fetchDiscover() {
+  const list = document.getElementById('discover-list');
+  list.innerHTML = '<div class="loading-state"><div class="spinner"></div><span>Loading…</span></div>';
 
-  // Reset to step 1
-  document.getElementById('link-step-1').hidden = false;
-  document.getElementById('link-step-2').hidden = true;
-  document.getElementById('link-next-btn').disabled = true;
-  document.getElementById('link-next-btn').textContent = 'Next';
-  document.getElementById('link-back-btn').hidden = true;
+  try {
+    const res = await apiFetch(`${BASE_URL}/api/shared-playlists/discover`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    state.discoverPlaylists = await res.json();
+    renderDiscover();
+  } catch (err) {
+    list.innerHTML = `<div class="empty-state"><p class="empty-title">Failed to load</p><p class="empty-sub">${escHtml(err.message)}</p></div>`;
+  }
+}
+
+function renderDiscover() {
+  const list = document.getElementById('discover-list');
+
+  if (state.discoverPlaylists.length === 0) {
+    list.innerHTML = `
+      <div class="empty-state">
+        <div class="empty-icon">🌍</div>
+        <p class="empty-title">Nothing to discover yet</p>
+        <p class="empty-sub">Public playlists from other users will appear here.</p>
+      </div>`;
+    return;
+  }
+
+  list.innerHTML = state.discoverPlaylists.map((pl) => `
+    <div class="link-card">
+      <div class="link-card-body">
+        <div class="link-arrow">
+          <span class="link-name shared-name">${escHtml(pl.name)}</span>
+          <span class="badge-public">🌍 Public</span>
+        </div>
+        ${pl.description ? `<p class="link-meta">${escHtml(pl.description)}</p>` : ''}
+        <p class="link-meta">${pl.track_count} track${pl.track_count !== 1 ? 's' : ''} · ${pl.user_count} user${pl.user_count !== 1 ? 's' : ''}</p>
+      </div>
+      <div class="link-card-actions">
+        <button class="btn btn-primary btn-sm" data-join="${pl.id}" data-join-name="${escHtml(pl.name)}">Join</button>
+      </div>
+    </div>`).join('');
+
+  list.querySelectorAll('[data-join]').forEach((btn) => {
+    btn.addEventListener('click', () =>
+      openJoinModal(parseInt(btn.dataset.join, 10), btn.dataset.joinName));
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Create Playlist Modal (two-step)
+// ---------------------------------------------------------------------------
+
+function openCreateModal() {
+  state.createStep          = 1;
+  state.createVisibility    = 'private';
+  state.createSelectedTidal = null;
+
+  // Reset step 1
+  document.getElementById('create-name').value = '';
+  document.getElementById('create-desc').value = '';
+  document.querySelector('input[name="create-visibility"][value="private"]').checked = true;
+  document.getElementById('create-error').textContent = '';
+
+  // Show step 1, hide step 2
+  document.getElementById('create-step-1').hidden = false;
+  document.getElementById('create-step-2').hidden = true;
+  document.getElementById('create-back-btn').hidden = true;
+  document.getElementById('create-next-btn').textContent = 'Next';
+  document.getElementById('create-next-btn').disabled = true;
+
+  openModal('create-modal');
+  setTimeout(() => document.getElementById('create-name').focus(), 60);
+}
+
+async function handleCreateNext() {
+  if (state.createStep === 1) {
+    const name = document.getElementById('create-name').value.trim();
+    if (!name) {
+      document.getElementById('create-error').textContent = 'Name is required.';
+      return;
+    }
+    document.getElementById('create-error').textContent = '';
+    state.createStep = 2;
+
+    document.getElementById('create-step-1').hidden = false; // keep visible briefly
+    document.getElementById('create-step-1').hidden = true;
+    document.getElementById('create-step-2').hidden = false;
+    document.getElementById('create-back-btn').hidden = false;
+    document.getElementById('create-next-btn').textContent = 'Create';
+    document.getElementById('create-next-btn').disabled = true;
+    state.createSelectedTidal = null;
+
+    // Load Tidal playlists
+    await loadTidalPlaylistsInto('create-tidal-list', (pl) => {
+      state.createSelectedTidal = pl;
+      document.getElementById('create-next-btn').disabled = false;
+    });
+
+  } else {
+    // Step 2 — submit
+    if (!state.createSelectedTidal) return;
+
+    const btn  = document.getElementById('create-next-btn');
+    const name = document.getElementById('create-name').value.trim();
+    const desc = document.getElementById('create-desc').value.trim() || null;
+
+    btn.disabled    = true;
+    btn.textContent = 'Creating…';
+
+    try {
+      const res = await apiFetch(`${BASE_URL}/api/shared-playlists`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({
+          name,
+          description:       desc,
+          isPublic:          state.createVisibility === 'public',
+          tidalPlaylistId:   state.createSelectedTidal.id,
+          tidalPlaylistName: state.createSelectedTidal.name,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+
+      closeModal('create-modal');
+      toast(`"${name}" created`, 'success');
+      await fetchMyPlaylists();
+    } catch (err) {
+      toast(`Create failed: ${err.message}`, 'error');
+      btn.disabled    = false;
+      btn.textContent = 'Create';
+    }
+  }
+}
+
+function handleCreateBack() {
+  state.createStep = 1;
+  document.getElementById('create-step-1').hidden = false;
+  document.getElementById('create-step-2').hidden = true;
+  document.getElementById('create-back-btn').hidden = true;
+  document.getElementById('create-next-btn').textContent = 'Next';
+  document.getElementById('create-next-btn').disabled =
+    !document.getElementById('create-name').value.trim();
+}
+
+// ---------------------------------------------------------------------------
+// Join Modal (Discover tab — join a public playlist)
+// ---------------------------------------------------------------------------
+
+async function openJoinModal(playlistId, playlistName) {
+  state.joinTargetPlaylist = { id: playlistId, name: playlistName };
+  state.joinSelectedTidal  = null;
+
+  document.getElementById('join-modal-subtitle').textContent = playlistName;
+  document.getElementById('join-confirm-btn').disabled = true;
+
+  openModal('join-modal');
+
+  await loadTidalPlaylistsInto('join-tidal-list', (pl) => {
+    state.joinSelectedTidal = pl;
+    document.getElementById('join-confirm-btn').disabled = false;
+  });
+}
+
+async function handleJoinConfirm() {
+  if (!state.joinTargetPlaylist || !state.joinSelectedTidal) return;
+
+  const btn = document.getElementById('join-confirm-btn');
+  btn.disabled    = true;
+  btn.textContent = 'Joining…';
+
+  try {
+    const res = await apiFetch(`${BASE_URL}/api/links`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({
+        sharedPlaylistId:  state.joinTargetPlaylist.id,
+        tidalPlaylistId:   state.joinSelectedTidal.id,
+        tidalPlaylistName: state.joinSelectedTidal.name,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+
+    closeModal('join-modal');
+    toast(`Joined "${state.joinTargetPlaylist.name}"`, 'success');
+    // Refresh both discover (to remove joined) and my playlists (to show new link)
+    await Promise.allSettled([fetchDiscover(), fetchMyPlaylists()]);
+  } catch (err) {
+    toast(`Join failed: ${err.message}`, 'error');
+    btn.disabled    = false;
+    btn.textContent = 'Join';
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Invite Link Modal (join via ?invite= URL or manually entered code)
+// ---------------------------------------------------------------------------
+
+async function openInviteLinkModal(code) {
+  state.resolvedInvite   = null;
+  state.linkSelectedTidal = null;
+
+  document.getElementById('link-modal-title').textContent    = 'Join with Invite';
+  document.getElementById('link-modal-subtitle').textContent = 'Validating invite code…';
+  document.getElementById('link-confirm-btn').disabled       = true;
+  document.getElementById('link-tidal-list').innerHTML =
+    '<div class="loading-state"><div class="spinner"></div><span>Validating…</span></div>';
 
   openModal('link-modal');
 
-  // Load Tidal playlists
-  const listEl = document.getElementById('tidal-playlists-list');
+  try {
+    const res = await apiFetch(`${BASE_URL}/api/invites/${encodeURIComponent(code)}`);
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}));
+      closeModal('link-modal');
+      toast(`Invalid invite: ${d.error ?? 'Code not found'}`, 'error');
+      return;
+    }
+    const { sharedPlaylistId, sharedPlaylistName } = await res.json();
+    state.resolvedInvite = { sharedPlaylistId, sharedPlaylistName, code };
+
+    document.getElementById('link-modal-subtitle').textContent = sharedPlaylistName;
+
+    await loadTidalPlaylistsInto('link-tidal-list', (pl) => {
+      state.linkSelectedTidal = pl;
+      document.getElementById('link-confirm-btn').disabled = false;
+    });
+  } catch (err) {
+    closeModal('link-modal');
+    toast(`Failed to validate invite: ${err.message}`, 'error');
+  }
+}
+
+async function handleLinkConfirm() {
+  if (!state.resolvedInvite || !state.linkSelectedTidal) return;
+
+  const btn = document.getElementById('link-confirm-btn');
+  btn.disabled    = true;
+  btn.textContent = 'Joining…';
+
+  try {
+    const res = await apiFetch(`${BASE_URL}/api/links`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({
+        inviteCode:        state.resolvedInvite.code,
+        tidalPlaylistId:   state.linkSelectedTidal.id,
+        tidalPlaylistName: state.linkSelectedTidal.name,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+
+    closeModal('link-modal');
+    toast(`Joined "${state.resolvedInvite.sharedPlaylistName}"`, 'success');
+    await fetchMyPlaylists();
+  } catch (err) {
+    toast(`Join failed: ${err.message}`, 'error');
+    btn.disabled    = false;
+    btn.textContent = 'Join Playlist';
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Invites Management Modal
+// ---------------------------------------------------------------------------
+
+async function openInvitesModal(playlistId, playlistName) {
+  state.currentInvitesPlaylistId = playlistId;
+
+  document.getElementById('invites-modal-subtitle').textContent = playlistName;
+  document.getElementById('invites-modal-body').innerHTML =
+    '<div class="loading-state"><div class="spinner"></div><span>Loading…</span></div>';
+
+  openModal('invites-modal');
+  await loadInvites(playlistId);
+}
+
+async function loadInvites(playlistId) {
+  const body = document.getElementById('invites-modal-body');
+  try {
+    const res = await apiFetch(`${BASE_URL}/api/shared-playlists/${playlistId}/invites`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const invites = await res.json();
+    renderInvites(invites);
+  } catch (err) {
+    body.innerHTML = `<div class="empty-state"><p class="empty-title">Failed to load invite links</p><p class="empty-sub">${escHtml(err.message)}</p></div>`;
+  }
+}
+
+function renderInvites(invites) {
+  const body = document.getElementById('invites-modal-body');
+
+  if (invites.length === 0) {
+    body.innerHTML = `
+      <div class="empty-state">
+        <p class="empty-title">No invite links yet</p>
+        <p class="empty-sub">Click <strong>+ New Link</strong> to generate a shareable invite.</p>
+      </div>`;
+    return;
+  }
+
+  body.innerHTML = invites.map((inv) => {
+    const url = `${BASE_URL}/?invite=${inv.code}`;
+    return `
+      <div class="invite-row">
+        <span class="invite-code">${escHtml(inv.code)}</span>
+        <span class="invite-url">${escHtml(url)}</span>
+        <button class="btn btn-ghost btn-sm btn-xs" data-copy-url="${escHtml(url)}">Copy</button>
+        <button class="btn btn-danger btn-sm btn-xs" data-revoke-invite="${inv.id}">Revoke</button>
+      </div>`;
+  }).join('');
+
+  body.querySelectorAll('[data-copy-url]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      navigator.clipboard.writeText(btn.dataset.copyUrl).then(() => {
+        const orig = btn.textContent;
+        btn.textContent = 'Copied!';
+        setTimeout(() => { btn.textContent = orig; }, 2000);
+      }).catch(() => toast('Could not copy to clipboard', 'error'));
+    });
+  });
+
+  body.querySelectorAll('[data-revoke-invite]').forEach((btn) => {
+    btn.addEventListener('click', () =>
+      handleRevokeInvite(parseInt(btn.dataset.revokeInvite, 10), btn));
+  });
+}
+
+async function handleGenerateInvite() {
+  const id  = state.currentInvitesPlaylistId;
+  if (!id) return;
+
+  const btn = document.getElementById('generate-invite-btn');
+  btn.disabled    = true;
+  btn.textContent = 'Generating…';
+
+  try {
+    const res = await apiFetch(`${BASE_URL}/api/shared-playlists/${id}/invites`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    });
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}));
+      throw new Error(d.error ?? `HTTP ${res.status}`);
+    }
+    toast('New invite link created', 'success');
+    await loadInvites(id);
+  } catch (err) {
+    toast(`Failed to create invite: ${err.message}`, 'error');
+  } finally {
+    btn.disabled    = false;
+    btn.textContent = '+ New Link';
+  }
+}
+
+async function handleRevokeInvite(inviteId, btn) {
+  btn.disabled    = true;
+  btn.textContent = '…';
+
+  try {
+    const res = await apiFetch(`${BASE_URL}/api/invites/${inviteId}`, { method: 'DELETE' });
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}));
+      throw new Error(d.error ?? `HTTP ${res.status}`);
+    }
+    toast('Invite link revoked', 'info');
+    await loadInvites(state.currentInvitesPlaylistId);
+  } catch (err) {
+    toast(`Failed to revoke: ${err.message}`, 'error');
+    btn.disabled    = false;
+    btn.textContent = 'Revoke';
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Tidal playlist loader (shared helper)
+// ---------------------------------------------------------------------------
+
+async function loadTidalPlaylistsInto(listElId, onSelect) {
+  const listEl = document.getElementById(listElId);
   listEl.innerHTML = '<div class="loading-state"><div class="spinner"></div><span>Loading your Tidal playlists…</span></div>';
 
   try {
@@ -679,7 +1297,7 @@ async function openLinkModal() {
       const body = await res.json().catch(() => ({}));
       throw new Error(body.error ?? `HTTP ${res.status}`);
     }
-    const data = await res.json(); // JSON:API data array
+    const data = await res.json();
 
     if (data.length === 0) {
       listEl.innerHTML = '<div class="empty-state"><p class="empty-title">No Tidal playlists found</p><p class="empty-sub">Create a playlist in Tidal first.</p></div>';
@@ -700,98 +1318,12 @@ async function openLinkModal() {
       btn.addEventListener('click', () => {
         listEl.querySelectorAll('.select-item').forEach((b) => b.classList.remove('selected'));
         btn.classList.add('selected');
-        state.selectedTidalPlaylist = { id: btn.dataset.id, name: btn.dataset.name };
-        document.getElementById('link-next-btn').disabled = false;
+        onSelect({ id: btn.dataset.id, name: btn.dataset.name });
       });
     });
   } catch (err) {
     listEl.innerHTML = `<div class="empty-state"><p class="empty-title">Failed to load Tidal playlists</p><p class="empty-sub">${escHtml(err.message)}</p></div>`;
   }
-}
-
-async function handleLinkNext() {
-  const step1 = document.getElementById('link-step-1');
-  const step2 = document.getElementById('link-step-2');
-  const nextBtn = document.getElementById('link-next-btn');
-  const backBtn = document.getElementById('link-back-btn');
-
-  if (!step2.hidden) {
-    // We're on step 2 — confirm the link
-    if (!state.selectedTidalPlaylist || !state.selectedSharedPlaylist) return;
-
-    nextBtn.disabled    = true;
-    nextBtn.textContent = 'Linking…';
-
-    try {
-      const res = await apiFetch(`${BASE_URL}/api/links`, {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({
-          sharedPlaylistId: state.selectedSharedPlaylist.id,
-          tidalPlaylistId:  state.selectedTidalPlaylist.id,
-          tidalPlaylistName: state.selectedTidalPlaylist.name,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
-
-      closeModal('link-modal');
-      toast(`Linked "${state.selectedTidalPlaylist.name}" → "${state.selectedSharedPlaylist.name}"`, 'success');
-      await fetchMyLinks();
-    } catch (err) {
-      toast(`Link failed: ${err.message}`, 'error');
-      nextBtn.disabled    = false;
-      nextBtn.textContent = 'Link Playlists';
-    }
-    return;
-  }
-
-  // Move from step 1 → step 2
-  step1.hidden = true;
-  step2.hidden = false;
-  backBtn.hidden = false;
-  nextBtn.disabled = true;
-  nextBtn.textContent = 'Link Playlists';
-
-  const listEl = document.getElementById('shared-playlists-select-list');
-  listEl.innerHTML = '<div class="loading-state"><div class="spinner"></div><span>Loading shared playlists…</span></div>';
-
-  try {
-    const res = await apiFetch(`${BASE_URL}/api/shared-playlists`);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const playlists = await res.json();
-
-    if (playlists.length === 0) {
-      listEl.innerHTML = '<div class="empty-state"><p class="empty-title">No shared playlists yet</p><p class="empty-sub">Ask an admin to create one first.</p></div>';
-      return;
-    }
-
-    listEl.innerHTML = playlists.map((pl) => `
-      <button class="select-item" data-id="${pl.id}" data-name="${escHtml(pl.name)}">
-        <span class="select-item-name">${escHtml(pl.name)}</span>
-        <span class="select-item-meta">${pl.track_count} tracks · ${pl.user_count} users</span>
-      </button>`).join('');
-
-    listEl.querySelectorAll('.select-item').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        listEl.querySelectorAll('.select-item').forEach((b) => b.classList.remove('selected'));
-        btn.classList.add('selected');
-        state.selectedSharedPlaylist = { id: parseInt(btn.dataset.id, 10), name: btn.dataset.name };
-        document.getElementById('link-next-btn').disabled = false;
-      });
-    });
-  } catch (err) {
-    listEl.innerHTML = `<div class="empty-state"><p class="empty-title">Failed to load playlists</p><p class="empty-sub">${escHtml(err.message)}</p></div>`;
-  }
-}
-
-function handleLinkBack() {
-  document.getElementById('link-step-1').hidden = false;
-  document.getElementById('link-step-2').hidden = true;
-  document.getElementById('link-back-btn').hidden = true;
-  document.getElementById('link-next-btn').textContent = 'Next';
-  document.getElementById('link-next-btn').disabled = !state.selectedTidalPlaylist;
-  state.selectedSharedPlaylist = null;
 }
 
 // ---------------------------------------------------------------------------
@@ -826,6 +1358,67 @@ async function fetchUsers() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Users view
+// ---------------------------------------------------------------------------
+
+async function fetchAllUsers() {
+  try {
+    const res = await apiFetch(`${BASE_URL}/api/users/all`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    state.allUsers = await res.json();
+    renderAllUsers();
+  } catch (err) {
+    console.error('[app] fetchAllUsers:', err.message);
+  }
+}
+
+function renderAllUsers() {
+  const el  = document.getElementById('all-users-list');
+  if (!el) return;
+
+  if (state.allUsers.length === 0) {
+    el.innerHTML = `<div class="empty-state"><p class="empty-title">No users have signed in yet</p></div>`;
+    return;
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  const rows = state.allUsers.map((u) => {
+    let badgeClass, badgeLabel;
+    if (u.last_seen == null) {
+      badgeClass = 'badge-offline'; badgeLabel = 'Offline';
+    } else if (now - u.last_seen < 300) {
+      badgeClass = 'badge-online';  badgeLabel = 'Online';
+    } else if (now - u.last_seen < 1800) {
+      badgeClass = 'badge-away';    badgeLabel = 'Away';
+    } else {
+      badgeClass = 'badge-offline'; badgeLabel = 'Offline';
+    }
+    const lastSeenText = u.last_seen != null ? timeAgo(u.last_seen) : 'Never';
+    const linkedText   = u.linked_count > 0 ? `${u.linked_count} linked` : 'None';
+    return `
+      <tr>
+        <td>${escHtml(u.display_name || u.user_id)}</td>
+        <td class="text-muted">${linkedText}</td>
+        <td class="text-muted">${lastSeenText}</td>
+        <td><span class="status-badge ${badgeClass}">${badgeLabel}</span></td>
+      </tr>`;
+  }).join('');
+
+  el.innerHTML = `
+    <table class="users-table">
+      <thead>
+        <tr>
+          <th>User</th>
+          <th>Playlists</th>
+          <th>Last Seen</th>
+          <th>Status</th>
+        </tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+
 async function fetchTracks(playlistId) {
   const res = await apiFetch(`${BASE_URL}/api/shared-playlists/${playlistId}/tracks`);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -856,7 +1449,7 @@ function renderStats() {
 }
 
 // ---------------------------------------------------------------------------
-// Render: Playlists
+// Render: Playlists (admin grid)
 // ---------------------------------------------------------------------------
 
 function renderPlaylists() {
@@ -867,7 +1460,7 @@ function renderPlaylists() {
       <div class="empty-state" style="grid-column:1/-1">
         <div class="empty-icon">🎵</div>
         <p class="empty-title">No shared playlists yet</p>
-        <p class="empty-sub">Click <strong>New Playlist</strong> to create one.</p>
+        <p class="empty-sub">Users can create playlists from the <strong>My Playlists</strong> tab.</p>
       </div>`;
     return;
   }
@@ -879,7 +1472,7 @@ function renderPlaylists() {
   });
 
   grid.querySelectorAll('[data-delete]').forEach((btn) => {
-    btn.addEventListener('click', () => handleDelete(Number(btn.dataset.delete), btn));
+    btn.addEventListener('click', () => handleAdminDelete(Number(btn.dataset.delete), btn));
   });
 }
 
@@ -887,12 +1480,15 @@ function playlistCardHTML(pl) {
   const descHTML = pl.description
     ? `<p class="card-desc">${escHtml(pl.description)}</p>`
     : '';
+  const visBadge = pl.is_public
+    ? '<span class="badge-public" style="font-size:0.7rem">🌍 Public</span>'
+    : '<span class="badge-private" style="font-size:0.7rem">🔒 Private</span>';
 
   return `
     <div class="playlist-card" data-id="${pl.id}">
       <div class="card-body">
         <div class="card-icon">🎵</div>
-        <h3 class="card-title">${escHtml(pl.name)}</h3>
+        <h3 class="card-title">${escHtml(pl.name)} ${visBadge}</h3>
         ${descHTML}
         <div class="card-meta">
           <span class="meta-item">
@@ -922,7 +1518,7 @@ function playlistCardHTML(pl) {
 }
 
 // ---------------------------------------------------------------------------
-// Render: Users
+// Render: Users (admin)
 // ---------------------------------------------------------------------------
 
 function renderUsers() {
@@ -968,52 +1564,10 @@ function renderUsers() {
 }
 
 // ---------------------------------------------------------------------------
-// Create Playlist
+// Admin: Delete Playlist (two-click)
 // ---------------------------------------------------------------------------
 
-async function handleCreateSubmit(e) {
-  e.preventDefault();
-
-  const name  = document.getElementById('pl-name').value.trim();
-  const desc  = document.getElementById('pl-desc').value.trim();
-  const errEl = document.getElementById('create-error');
-  const btn   = document.getElementById('create-submit-btn');
-
-  errEl.textContent = '';
-
-  if (!name) {
-    errEl.textContent = 'Playlist name is required.';
-    document.getElementById('pl-name').focus();
-    return;
-  }
-
-  setLoadingBtn(btn, true);
-
-  try {
-    const res = await apiFetch(`${BASE_URL}/api/shared-playlists`, {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ name, description: desc || undefined }),
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
-
-    closeModal('create-modal');
-    document.getElementById('create-form').reset();
-    toast(`"${name}" created`, 'success');
-    await fetchPlaylists();
-  } catch (err) {
-    errEl.textContent = err.message;
-  } finally {
-    setLoadingBtn(btn, false);
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Delete Playlist  (two-click confirmation)
-// ---------------------------------------------------------------------------
-
-async function handleDelete(id, btn) {
+async function handleAdminDelete(id, btn) {
   const pl   = state.playlists.find((p) => p.id === id);
   const name = pl?.name ?? `Playlist #${id}`;
 
@@ -1049,7 +1603,7 @@ async function handleDelete(id, btn) {
 }
 
 // ---------------------------------------------------------------------------
-// View Playlist Modal
+// View Playlist Modal (admin)
 // ---------------------------------------------------------------------------
 
 async function openViewModal(id) {
@@ -1243,12 +1797,10 @@ function connectWebSocket() {
 
 function setWsStatus(online) {
   if (online) {
-    // Clear any pending disconnect notification and immediately show connected
     clearTimeout(state.wsDisconnectTimer);
     state.wsDisconnectTimer = null;
     _applyWsStatus(true);
   } else {
-    // Debounce: only show Disconnected after 1.5s to absorb brief mobile hiccups
     if (!state.wsDisconnectTimer) {
       state.wsDisconnectTimer = setTimeout(() => {
         state.wsDisconnectTimer = null;

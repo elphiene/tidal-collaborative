@@ -5,6 +5,7 @@ const { encrypt, decrypt }   = require('./crypto');
 const {
   refreshTokens,
   tidalGetPlaylistTrackIds,
+  tidalGetPlaylistTrackList,
   tidalGetTrackInfo,
   tidalAddTrack,
   tidalRemoveTrack,
@@ -15,9 +16,11 @@ const {
 // Map<tidalPlaylistId, Set<trackId>>
 // ---------------------------------------------------------------------------
 const knownTracks  = new Map();
-// Progressive scan positions for large playlists.
-// Map<tidalPlaylistId, nextOffset> — 0 / absent means start from beginning.
+// Progressive scan cursors for large playlists.
+// Map<tidalPlaylistId, nextCursor> — null / absent means start from beginning.
 const scanOffsets  = new Map();
+// Playlists currently being seeded by initNewLink — poller skips these.
+const initializingPlaylists = new Set();
 
 let pollInProgress = false;
 
@@ -50,20 +53,21 @@ async function pollAll(broadcastFn) {
 
 async function pollUser(user, broadcastFn) {
   let accessToken;
-  console.log(`[poller] pollUser start: user=${user.user_id} tokenExpiresIn=${Math.round((user.token_expires_at - Date.now()) / 1000)}s`);
+  const userName = user.display_name || user.user_id;
+  console.log(`[poller] pollUser start: user="${userName}" tokenExpiresIn=${Math.round((user.token_expires_at - Date.now()) / 1000)}s`);
 
   try {
     // Refresh token if within 5 minutes of expiry
     if (user.token_expires_at - Date.now() < 5 * 60 * 1000) {
       if (!user.refresh_token_enc) throw new Error('TIDAL_SESSION_DEAD');
-      console.log(`[poller] refreshing token for user ${user.user_id}`);
+      console.log(`[poller] refreshing token for "${userName}"`);
       const refreshToken = decrypt(user.refresh_token_enc);
       const tokens       = await refreshTokens(refreshToken);
       db.upsertUser(
         user.user_id,
         user.display_name,
         encrypt(tokens.accessToken),
-        encrypt(tokens.refreshToken),
+        tokens.refreshToken ? encrypt(tokens.refreshToken) : user.refresh_token_enc,
         tokens.expiresAt,
       );
       accessToken = tokens.accessToken;
@@ -71,25 +75,38 @@ async function pollUser(user, broadcastFn) {
       accessToken = decrypt(user.access_token_enc);
     }
   } catch (err) {
-    console.warn(`[poller] token unusable for user ${user.user_id} (${err.message}) — removing user`);
+    console.warn(`[poller] token unusable for "${userName}" (${err.message}) — removing user`);
     db.deleteUser(user.user_id);
     return;
   }
 
   const links = db.getUserLinks(user.user_id);
-  console.log(`[poller] user=${user.user_id}: polling ${links.length} playlist(s)`);
+  console.log(`[poller] user="${userName}": polling ${links.length} playlist(s)`);
 
   for (let i = 0; i < links.length; i++) {
     if (i > 0) await new Promise((r) => setTimeout(r, 500));
-    console.log(`[poller] user=${user.user_id}: starting playlist ${links[i].tidal_playlist_id}`);
+    const plName = links[i].tidal_playlist_name || links[i].tidal_playlist_id;
+    if (initializingPlaylists.has(links[i].tidal_playlist_id)) {
+      console.log(`[poller] user="${userName}": skipping "${plName}" — initNewLink in progress`);
+      continue;
+    }
+    console.log(`[poller] user="${userName}": starting playlist "${plName}"`);
     try {
       await pollPlaylist(links[i], user.user_id, accessToken, broadcastFn);
-      console.log(`[poller] user=${user.user_id}: finished playlist ${links[i].tidal_playlist_id}`);
+      console.log(`[poller] user="${userName}": finished playlist "${plName}"`);
     } catch (err) {
       console.error(
-        `[poller] poll failed for user=${user.user_id} tidalPlaylist=${links[i].tidal_playlist_id}: ${err.message}`,
+        `[poller] poll failed for user="${userName}" tidalPlaylist="${plName}": ${err.message}`,
       );
     }
+  }
+
+  // Backfill missing track metadata (fires once per server run; retries if incomplete)
+  if (!_backfillDone) {
+    _backfillDone = true;
+    backfillTrackMetadata(accessToken).catch((err) =>
+      console.warn('[poller] backfill error:', err.message)
+    );
   }
 }
 
@@ -102,7 +119,9 @@ async function getAccessTokenForUser(user) {
     const tokens = await refreshTokens(decrypt(user.refresh_token_enc));
     db.upsertUser(
       user.user_id, user.display_name,
-      encrypt(tokens.accessToken), encrypt(tokens.refreshToken), tokens.expiresAt,
+      encrypt(tokens.accessToken),
+      tokens.refreshToken ? encrypt(tokens.refreshToken) : user.refresh_token_enc,
+      tokens.expiresAt,
     );
     return tokens.accessToken;
   }
@@ -123,22 +142,25 @@ async function propagateToOtherUsers(sharedPlaylistId, excludeUserId, trackId, a
       if (!user) continue;
       const token = await getAccessTokenForUser(user);
 
+      const linkUserName = user.display_name || link.user_id;
+      const linkPlName   = link.tidal_playlist_name || link.tidal_playlist_id;
       if (action === 'add') {
+        const known = knownTracks.get(link.tidal_playlist_id);
+        if (known?.has(String(trackId))) {
+          console.log(`[poller] skipping duplicate add ${trackId} → user="${linkUserName}" (already in playlist)`);
+          continue;
+        }
         await tidalAddTrack(link.tidal_playlist_id, trackId, token);
-        console.log(`[poller] propagated add ${trackId} → user=${link.user_id} playlist=${link.tidal_playlist_id}`);
+        console.log(`[poller] propagated add ${trackId} → user="${linkUserName}" playlist="${linkPlName}"`);
+        if (known) known.add(String(trackId));
       } else {
         await tidalRemoveTrack(link.tidal_playlist_id, trackId, token);
-        console.log(`[poller] propagated remove ${trackId} → user=${link.user_id} playlist=${link.tidal_playlist_id}`);
-      }
-
-      // Update knownTracks so the next poll doesn't re-detect this as a change
-      const known = knownTracks.get(link.tidal_playlist_id);
-      if (known) {
-        if (action === 'add') known.add(String(trackId));
-        else known.delete(String(trackId));
+        console.log(`[poller] propagated remove ${trackId} → user="${linkUserName}" playlist="${linkPlName}"`);
+        const known = knownTracks.get(link.tidal_playlist_id);
+        if (known) known.delete(String(trackId));
       }
     } catch (err) {
-      console.error(`[poller] propagate ${action} to user=${link.user_id}: ${err.message}`);
+      console.error(`[poller] propagate ${action} to user="${link.user_id}": ${err.message}`);
     }
   }
 }
@@ -147,11 +169,11 @@ async function pollPlaylist(link, userId, accessToken, broadcastFn) {
   const tidalPlaylistId  = link.tidal_playlist_id;
   const sharedPlaylistId = link.shared_playlist_id;
 
-  const startOffset   = scanOffsets.get(tidalPlaylistId) ?? 0;
-  const isPartialScan = startOffset > 0;
+  const startCursor   = scanOffsets.get(tidalPlaylistId) ?? null;
+  const isPartialScan = startCursor !== null;
 
-  const { ids: currentIds, truncated, nextOffset } =
-    await tidalGetPlaylistTrackIds(tidalPlaylistId, accessToken, startOffset);
+  const { ids: currentIds, truncated, nextCursor } =
+    await tidalGetPlaylistTrackIds(tidalPlaylistId, accessToken, startCursor);
 
   const known = knownTracks.get(tidalPlaylistId) ?? new Set();
 
@@ -161,7 +183,7 @@ async function pollPlaylist(link, userId, accessToken, broadcastFn) {
 
   if (added.length > 0 || removed.length > 0) {
     console.log(
-      `[poller] ${tidalPlaylistId}: +${added.length} -${removed.length} tracks (user=${userId})`,
+      `[poller] "${link.tidal_playlist_name || tidalPlaylistId}": +${added.length} -${removed.length} tracks`,
     );
   }
 
@@ -214,7 +236,7 @@ async function pollPlaylist(link, userId, accessToken, broadcastFn) {
 
   // Advance (or reset) the scan position for next cycle
   if (truncated) {
-    scanOffsets.set(tidalPlaylistId, nextOffset);
+    scanOffsets.set(tidalPlaylistId, nextCursor);
   } else {
     scanOffsets.delete(tidalPlaylistId);
   }
@@ -229,7 +251,30 @@ async function pollPlaylist(link, userId, accessToken, broadcastFn) {
  * @param {Function} broadcastFn  (sharedPlaylistId, message, excludeUserId) => void
  * @param {number}   intervalMs   default 60 seconds
  */
-let _broadcastFn = null;
+let _broadcastFn  = null;
+let _backfillDone = false;
+
+/**
+ * Fetch title/artist from Tidal for any tracks in the DB with null metadata.
+ * Fires once per server run (or retries next cycle if some tracks failed).
+ */
+async function backfillTrackMetadata(accessToken) {
+  const tracks = db.getTracksWithNullMetadata();
+  if (tracks.length === 0) return;
+
+  console.log(`[poller] backfilling metadata for ${tracks.length} track(s)…`);
+  let filled = 0;
+  for (const track of tracks) {
+    const { title, artist } = await tidalGetTrackInfo(String(track.tidal_track_id), accessToken);
+    if (title || artist) {
+      db.updateTrackMetadata(track.tidal_track_id, title, artist);
+      filled++;
+    }
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  console.log(`[poller] backfill complete: ${filled}/${tracks.length} tracks updated`);
+  if (filled < tracks.length) _backfillDone = false; // retry next cycle if incomplete
+}
 
 function seedKnownTracksFromDB() {
   const users = db.getAllUsersWithLinks();
@@ -274,11 +319,14 @@ async function initNewLink(link) {
   const user = db.getUser(userId);
   if (!user) return;
 
+  initializingPlaylists.add(tidalPlaylistId);
+
   let accessToken;
   try {
     accessToken = await getAccessTokenForUser(user);
   } catch (err) {
-    console.error(`[poller] initNewLink: token error for user ${userId}: ${err.message}`);
+    console.error(`[poller] initNewLink: token error for "${user?.display_name || userId}": ${err.message}`);
+    initializingPlaylists.delete(tidalPlaylistId);
     return;
   }
 
@@ -287,25 +335,119 @@ async function initNewLink(link) {
   if (existingTracks.length === 0) {
     // Nothing to seed — let the normal poll handle it
     knownTracks.set(tidalPlaylistId, new Set());
+    initializingPlaylists.delete(tidalPlaylistId);
     return;
   }
 
-  console.log(`[poller] initNewLink: pushing ${existingTracks.length} existing tracks to ${tidalPlaylistId} (user=${userId})`);
+  console.log(`[poller] initNewLink: pushing ${existingTracks.length} existing tracks to "${link.tidal_playlist_name || tidalPlaylistId}" for "${user.display_name || userId}"`);
+
+  const { ids: existingIds } = await tidalGetPlaylistTrackIds(tidalPlaylistId, accessToken);
 
   const seededIds = new Set();
   for (const track of existingTracks) {
-    try {
-      await tidalAddTrack(tidalPlaylistId, track.tidal_track_id, accessToken);
-    } catch (err) {
-      // Track may already be in the playlist — not fatal
-      console.warn(`[poller] initNewLink: could not add ${track.tidal_track_id}: ${err.message}`);
+    const id = String(track.tidal_track_id);
+    if (!existingIds.has(id)) {
+      try {
+        await tidalAddTrack(tidalPlaylistId, id, accessToken);
+      } catch (err) {
+        console.warn(`[poller] initNewLink: could not add ${id}: ${err.message}`);
+      }
     }
-    // Always seed the ID so the next poll doesn't re-detect it as a new addition
-    seededIds.add(String(track.tidal_track_id));
+    seededIds.add(id);
   }
 
   knownTracks.set(tidalPlaylistId, seededIds);
-  console.log(`[poller] initNewLink: seeded knownTracks[${tidalPlaylistId}] with ${seededIds.size} IDs`);
+  initializingPlaylists.delete(tidalPlaylistId);
+  console.log(`[poller] initNewLink: seeded "${link.tidal_playlist_name || tidalPlaylistId}" with ${seededIds.size} IDs`);
 }
 
-module.exports = { startPoller, pollNow, initNewLink };
+/**
+ * Force-sync a user's Tidal playlist using a bidirectional merge.
+ * - Tidal-only tracks → merged into server DB + propagated to other users
+ * - Server-only tracks → added to Tidal
+ * - Duplicates in Tidal → excess copies removed
+ * Updates knownTracks and clears scanOffsets so the next normal poll starts clean.
+ *
+ * @param {{ tidal_playlist_id: string, shared_playlist_id: number, user_id: number }} link
+ * @param {string} accessToken
+ * @returns {{ added: number, merged: number, duplicatesFixed: number }}
+ */
+async function syncPlaylistForLink(link, accessToken) {
+  const { tidal_playlist_id: tidalPlaylistId, shared_playlist_id: sharedPlaylistId, user_id: userId } = link;
+
+  // Fetch Tidal playlist as array (preserves duplicates)
+  const tidalList = await tidalGetPlaylistTrackList(tidalPlaylistId, accessToken);
+
+  // Count occurrences in Tidal
+  const tidalCounts = new Map();
+  for (const id of tidalList) tidalCounts.set(id, (tidalCounts.get(id) ?? 0) + 1);
+
+  // Current server state (mutable — updated as we merge Tidal-only tracks in)
+  const serverTracks = db.getPlaylistTracks(sharedPlaylistId);
+  const serverIds    = new Set(serverTracks.map((t) => String(t.tidal_track_id)));
+
+  let added = 0, merged = 0, duplicatesFixed = 0;
+
+  // Pass 1: Walk Tidal tracks
+  //   - Duplicates → remove excess copies
+  //   - Tidal-only tracks → merge into server (same as what a normal poll does)
+  for (const [id, tidalCount] of tidalCounts) {
+    if (tidalCount > 1) {
+      const excess = tidalCount - 1;
+      for (let i = 0; i < excess; i++) {
+        try {
+          await tidalRemoveTrack(tidalPlaylistId, id, accessToken);
+          duplicatesFixed++;
+        } catch (err) {
+          console.warn(`[sync] could not remove duplicate ${id}: ${err.message}`);
+        }
+        await new Promise((r) => setTimeout(r, 300));
+      }
+    }
+
+    if (!serverIds.has(id)) {
+      const { title, artist } = await tidalGetTrackInfo(id, accessToken);
+      const maxPos = db.getMaxPosition(sharedPlaylistId);
+      const track  = db.addTrack(sharedPlaylistId, id, userId, maxPos + 1, title, artist);
+      if (track) {
+        if (_broadcastFn) {
+          _broadcastFn(sharedPlaylistId, {
+            type:               'track_added',
+            shared_playlist_id: sharedPlaylistId,
+            tidal_track_id:     id,
+            track_title:        title,
+            track_artist:       artist,
+            added_by:           userId,
+            position:           track.position,
+            timestamp:          Date.now(),
+          }, userId);
+        }
+        await propagateToOtherUsers(sharedPlaylistId, userId, id, 'add');
+        serverIds.add(id);
+        merged++;
+      }
+    }
+  }
+
+  // Pass 2: Add to Tidal any server tracks not currently in Tidal
+  for (const id of serverIds) {
+    if (!tidalCounts.has(id)) {
+      try {
+        await tidalAddTrack(tidalPlaylistId, id, accessToken);
+        added++;
+      } catch (err) {
+        console.warn(`[sync] could not add ${id}: ${err.message}`);
+      }
+      await new Promise((r) => setTimeout(r, 300));
+    }
+  }
+
+  // Update knownTracks to mirror final merged state; clear progressive scan offset
+  knownTracks.set(tidalPlaylistId, new Set(serverIds));
+  scanOffsets.delete(tidalPlaylistId);
+
+  console.log(`[sync] ${tidalPlaylistId}: +${added} to Tidal, +${merged} merged to server, ~${duplicatesFixed} dupes fixed`);
+  return { added, merged, duplicatesFixed };
+}
+
+module.exports = { startPoller, pollNow, initNewLink, getAccessTokenForUser, syncPlaylistForLink };

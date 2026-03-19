@@ -5,12 +5,23 @@ PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
 PRAGMA synchronous = NORMAL;
 
--- Admin-created playlists that collaborators sync to
+-- Playlists that collaborators sync to
 CREATE TABLE IF NOT EXISTS shared_playlists (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   name        TEXT    NOT NULL,
   description TEXT,
+  created_by  TEXT,           -- user_id of creator; NULL = legacy admin-created
+  is_public   INTEGER NOT NULL DEFAULT 0,  -- 1 = public, 0 = private
   created_at  INTEGER NOT NULL DEFAULT (unixepoch())
+);
+
+-- Invite codes for private playlists
+CREATE TABLE IF NOT EXISTS playlist_invites (
+  id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+  shared_playlist_id INTEGER NOT NULL REFERENCES shared_playlists(id) ON DELETE CASCADE,
+  code               TEXT    NOT NULL UNIQUE,
+  created_at         INTEGER NOT NULL DEFAULT (unixepoch()),
+  revoked_at         INTEGER
 );
 
 -- Each user's local Tidal playlist linked to a shared playlist
@@ -67,3 +78,5 @@ CREATE INDEX IF NOT EXISTS idx_links_user       ON playlist_links(user_id);
 CREATE INDEX IF NOT EXISTS idx_links_playlist   ON playlist_links(shared_playlist_id);
 CREATE INDEX IF NOT EXISTS idx_users_user       ON active_users(user_id);
 CREATE INDEX IF NOT EXISTS idx_users_playlist   ON active_users(shared_playlist_id);
+CREATE INDEX IF NOT EXISTS idx_invites_playlist ON playlist_invites(shared_playlist_id);
+CREATE INDEX IF NOT EXISTS idx_invites_code     ON playlist_invites(code);

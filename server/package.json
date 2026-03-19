@@ -1,6 +1,6 @@
 {
   "name": "tidal-collaborative-server",
-  "version": "0.1.0",
+  "version": "1.7.0",
   "description": "Self-hosted server for real-time collaborative Tidal playlist sync",
   "main": "src/index.js",
   "scripts": {
