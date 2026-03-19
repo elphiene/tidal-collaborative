@@ -1,6 +1,25 @@
+x-casaos:
+  architectures:
+    - amd64
+    - arm64
+  main: tidal-collaborative
+  author: elphiene
+  category: Media
+  title:
+    en_us: Tidal Collaborative
+  tagline:
+    en_us: Collaborative Tidal playlist sync
+  description:
+    en_us: Self-hosted server that lets multiple users share and sync Tidal playlists in real time. Changes propagate automatically — no browser extension required.
+  port_map: "3000"
+  scheme: http
+  index: /
+  tips: {}
+
 services:
   tidal-collaborative:
     image: elphiene/tidal-collaborative:latest
+    pull_policy: always
     container_name: tidal-collaborative
     restart: unless-stopped
 

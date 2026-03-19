@@ -23,9 +23,28 @@ This guide walks through installing **Tidal Collaborative** via the CasaOS web U
 4. Paste the following compose config:
 
 ```yaml
+x-casaos:
+  architectures:
+    - amd64
+    - arm64
+  main: tidal-collaborative
+  author: elphiene
+  category: Media
+  title:
+    en_us: Tidal Collaborative
+  tagline:
+    en_us: Collaborative Tidal playlist sync
+  description:
+    en_us: Self-hosted server that lets multiple users share and sync Tidal playlists in real time. Changes propagate automatically — no browser extension required.
+  port_map: "3000"
+  scheme: http
+  index: /
+  tips: {}
+
 services:
   tidal-collaborative:
     image: elphiene/tidal-collaborative:latest
+    pull_policy: always
     container_name: tidal-collaborative
     restart: unless-stopped
     ports:
@@ -192,6 +211,21 @@ docker rmi elphiene/tidal-collaborative
 ---
 
 ## Troubleshooting
+
+### CasaOS shows old version after redeploy
+
+CasaOS caches Docker images locally and won't pull a new `latest` automatically. Force a pull via SSH:
+
+```bash
+docker pull elphiene/tidal-collaborative:latest
+docker restart tidal-collaborative
+```
+
+The compose config now includes `pull_policy: always`, which ensures `docker compose up` always checks Docker Hub for a newer image. If your CasaOS install is using an older compose config without this line, update it in the CasaOS UI (**Apps → Edit** the app's compose YAML) and add:
+
+```yaml
+    pull_policy: always
+```
 
 ### Container exits immediately
 

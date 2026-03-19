@@ -35,6 +35,38 @@ function init() {
   try {
     db.exec('ALTER TABLE tracks ADD COLUMN track_artist TEXT');
   } catch { /* column already exists */ }
+  try {
+    db.exec('ALTER TABLE shared_playlists ADD COLUMN created_by TEXT');
+  } catch { /* column already exists */ }
+  try {
+    db.exec('ALTER TABLE shared_playlists ADD COLUMN is_public INTEGER NOT NULL DEFAULT 0');
+  } catch { /* column already exists */ }
+  try {
+    db.exec(`CREATE TABLE IF NOT EXISTS playlist_invites (
+      id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+      shared_playlist_id INTEGER NOT NULL REFERENCES shared_playlists(id) ON DELETE CASCADE,
+      code               TEXT    NOT NULL UNIQUE,
+      created_at         INTEGER NOT NULL DEFAULT (unixepoch()),
+      revoked_at         INTEGER
+    )`);
+    db.exec('CREATE INDEX IF NOT EXISTS idx_invites_playlist ON playlist_invites(shared_playlist_id)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_invites_code ON playlist_invites(code)');
+  } catch { /* already exists */ }
+
+  // Backfill created_by for legacy playlists (pre-dating the column)
+  try {
+    db.exec(`
+      UPDATE shared_playlists
+      SET created_by = (
+        SELECT user_id FROM playlist_links
+        WHERE shared_playlist_id = shared_playlists.id
+        ORDER BY created_at ASC
+        LIMIT 1
+      )
+      WHERE created_by IS NULL
+        AND id IN (SELECT DISTINCT shared_playlist_id FROM playlist_links)
+    `);
+  } catch { /* ignore */ }
 
   console.log(`[db] opened ${config.DB_PATH}`);
   return db;
@@ -51,28 +83,59 @@ function close() {
 // shared_playlists
 // ---------------------------------------------------------------------------
 
-function getSharedPlaylists() {
+function getSharedPlaylists(userId = null) {
+  if (!userId) {
+    // Admin call — return all
+    return db.prepare(`
+      SELECT sp.*,
+        COUNT(DISTINCT pl.user_id)                                     AS user_count,
+        COUNT(DISTINCT CASE WHEN t.removed_at IS NULL THEN t.id END)  AS track_count
+      FROM shared_playlists sp
+      LEFT JOIN playlist_links pl ON pl.shared_playlist_id = sp.id
+      LEFT JOIN tracks         t  ON t.shared_playlist_id  = sp.id
+      GROUP BY sp.id ORDER BY sp.created_at DESC
+    `).all();
+  }
+  // User call — return only playlists they created or are linked to
   return db.prepare(`
-    SELECT
-      sp.id,
-      sp.name,
-      sp.description,
-      sp.created_at,
-      COUNT(DISTINCT pl.user_id)                                         AS user_count,
-      COUNT(DISTINCT CASE WHEN t.removed_at IS NULL THEN t.id END)      AS track_count
+    SELECT sp.*,
+      COUNT(DISTINCT pl.user_id)                                     AS user_count,
+      COUNT(DISTINCT CASE WHEN t.removed_at IS NULL THEN t.id END)  AS track_count
     FROM shared_playlists sp
     LEFT JOIN playlist_links pl ON pl.shared_playlist_id = sp.id
     LEFT JOIN tracks         t  ON t.shared_playlist_id  = sp.id
-    GROUP BY sp.id
-    ORDER BY sp.created_at DESC
-  `).all();
+    WHERE sp.created_by = ?
+       OR sp.id IN (SELECT shared_playlist_id FROM playlist_links WHERE user_id = ?)
+    GROUP BY sp.id ORDER BY sp.created_at DESC
+  `).all(userId, userId);
 }
 
-function createSharedPlaylist(name, description = null) {
+function getPublicPlaylists(userId) {
+  return db.prepare(`
+    SELECT sp.*,
+      COUNT(DISTINCT pl.user_id)                                     AS user_count,
+      COUNT(DISTINCT CASE WHEN t.removed_at IS NULL THEN t.id END)  AS track_count
+    FROM shared_playlists sp
+    LEFT JOIN playlist_links pl ON pl.shared_playlist_id = sp.id
+    LEFT JOIN tracks         t  ON t.shared_playlist_id  = sp.id
+    WHERE sp.is_public = 1
+      AND (sp.created_by IS NULL OR sp.created_by != ?)
+      AND sp.id NOT IN (SELECT shared_playlist_id FROM playlist_links WHERE user_id = ?)
+    GROUP BY sp.id ORDER BY sp.created_at DESC
+  `).all(userId, userId);
+}
+
+function createSharedPlaylist(name, description = null, createdBy = null, isPublic = 0) {
   const info = db.prepare(
-    'INSERT INTO shared_playlists (name, description) VALUES (?, ?)',
-  ).run(name, description);
+    'INSERT INTO shared_playlists (name, description, created_by, is_public) VALUES (?, ?, ?, ?)',
+  ).run(name, description, createdBy, isPublic ? 1 : 0);
   return db.prepare('SELECT * FROM shared_playlists WHERE id = ?').get(info.lastInsertRowid);
+}
+
+function updateSharedPlaylist(id, { isPublic }) {
+  return db.prepare(
+    'UPDATE shared_playlists SET is_public = ? WHERE id = ?',
+  ).run(isPublic ? 1 : 0, id);
 }
 
 function deleteSharedPlaylist(id) {
@@ -85,7 +148,9 @@ function deleteSharedPlaylist(id) {
 
 function getUserLinks(userId) {
   return db.prepare(`
-    SELECT pl.*, sp.name AS shared_playlist_name
+    SELECT pl.*, sp.name AS shared_playlist_name,
+           sp.created_by AS playlist_created_by,
+           sp.is_public  AS playlist_is_public
     FROM playlist_links pl
     JOIN shared_playlists sp ON sp.id = pl.shared_playlist_id
     WHERE pl.user_id = ?
@@ -109,6 +174,10 @@ function createLink(sharedPlaylistId, userId, tidalPlaylistId, tidalPlaylistName
 
 function deleteLink(id) {
   return db.prepare('DELETE FROM playlist_links WHERE id = ?').run(id);
+}
+
+function getLinkById(id) {
+  return db.prepare('SELECT * FROM playlist_links WHERE id = ?').get(id);
 }
 
 function checkLinkExists(sharedPlaylistId, userId) {
@@ -172,6 +241,26 @@ function addTrack(sharedPlaylistId, tidalTrackId, addedBy, position, trackTitle 
 }
 
 /**
+ * All active tracks with no title (need metadata backfill).
+ */
+function getTracksWithNullMetadata() {
+  return db.prepare(`
+    SELECT DISTINCT tidal_track_id FROM tracks
+    WHERE removed_at IS NULL AND track_title IS NULL
+  `).all();
+}
+
+/**
+ * Set title/artist on all rows matching a track ID that still have null titles.
+ */
+function updateTrackMetadata(tidalTrackId, title, artist) {
+  db.prepare(`
+    UPDATE tracks SET track_title = ?, track_artist = ?
+    WHERE tidal_track_id = ? AND track_title IS NULL
+  `).run(title, artist, String(tidalTrackId));
+}
+
+/**
  * Soft-delete a track (sets removed_at). Returns the run result.
  */
 function removeTrack(sharedPlaylistId, tidalTrackId) {
@@ -198,6 +287,35 @@ function updateTrackPositions(sharedPlaylistId, positions) {
     }
   });
   runAll(positions);
+}
+
+// ---------------------------------------------------------------------------
+// playlist_invites
+// ---------------------------------------------------------------------------
+
+function createInvite(sharedPlaylistId, code) {
+  const info = db.prepare(
+    'INSERT INTO playlist_invites (shared_playlist_id, code) VALUES (?, ?)',
+  ).run(sharedPlaylistId, code);
+  return db.prepare('SELECT * FROM playlist_invites WHERE id = ?').get(info.lastInsertRowid);
+}
+
+function getInvitesByPlaylist(sharedPlaylistId) {
+  return db.prepare(
+    'SELECT * FROM playlist_invites WHERE shared_playlist_id = ? AND revoked_at IS NULL ORDER BY created_at DESC',
+  ).all(sharedPlaylistId);
+}
+
+function getInviteByCode(code) {
+  return db.prepare(
+    'SELECT * FROM playlist_invites WHERE code = ? AND revoked_at IS NULL',
+  ).get(code);
+}
+
+function revokeInvite(id) {
+  return db.prepare(
+    'UPDATE playlist_invites SET revoked_at = unixepoch() WHERE id = ? AND revoked_at IS NULL',
+  ).run(id);
 }
 
 // ---------------------------------------------------------------------------
@@ -279,6 +397,21 @@ function getActiveUsers() {
   `).all();
 }
 
+function getAllUsersWithPresence() {
+  return db.prepare(`
+    SELECT u.user_id,
+           u.display_name,
+           u.created_at,
+           COUNT(DISTINCT pl.id) AS linked_count,
+           MAX(au.last_seen)     AS last_seen
+    FROM users u
+    LEFT JOIN playlist_links pl ON pl.user_id = u.user_id
+    LEFT JOIN active_users   au ON au.user_id = u.user_id
+    GROUP BY u.user_id
+    ORDER BY last_seen DESC, u.display_name ASC
+  `).all();
+}
+
 // ---------------------------------------------------------------------------
 // Exports
 // ---------------------------------------------------------------------------
@@ -296,22 +429,33 @@ module.exports = {
   getAllUsersWithLinks,
   // shared_playlists
   getSharedPlaylists,
+  getPublicPlaylists,
   createSharedPlaylist,
+  updateSharedPlaylist,
   deleteSharedPlaylist,
   // playlist_links
   getUserLinks,
   getPlaylistLinks,
   createLink,
   deleteLink,
+  getLinkById,
   checkLinkExists,
   getLinkedUsers,
   // tracks
   getPlaylistTracks,
   addTrack,
   removeTrack,
+  getTracksWithNullMetadata,
+  updateTrackMetadata,
   updateTrackPositions,
   getMaxPosition,
   // active_users
   updateUserLastSeen,
   getActiveUsers,
+  getAllUsersWithPresence,
+  // playlist_invites
+  createInvite,
+  getInvitesByPlaylist,
+  getInviteByCode,
+  revokeInvite,
 };
