@@ -75,8 +75,8 @@ async function pollUser(user, broadcastFn) {
       accessToken = decrypt(user.access_token_enc);
     }
   } catch (err) {
-    console.warn(`[poller] token unusable for "${userName}" (${err.message}) — removing user`);
-    db.deleteUser(user.user_id);
+    console.warn(`[poller] token unusable for "${userName}" (${err.message}) — marking dead, keeping data`);
+    db.markUserTokenDead(user.user_id);
     return;
   }
 
