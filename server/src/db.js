@@ -42,6 +42,9 @@ function init() {
     db.exec('ALTER TABLE shared_playlists ADD COLUMN is_public INTEGER NOT NULL DEFAULT 0');
   } catch { /* column already exists */ }
   try {
+    db.exec('ALTER TABLE users ADD COLUMN token_dead INTEGER NOT NULL DEFAULT 0');
+  } catch { /* column already exists */ }
+  try {
     db.exec(`CREATE TABLE IF NOT EXISTS playlist_invites (
       id                 INTEGER PRIMARY KEY AUTOINCREMENT,
       shared_playlist_id INTEGER NOT NULL REFERENCES shared_playlists(id) ON DELETE CASCADE,
@@ -339,14 +342,19 @@ function setSetting(key, value) {
 
 function upsertUser(userId, displayName, accessTokenEnc, refreshTokenEnc, tokenExpiresAt) {
   return db.prepare(`
-    INSERT INTO users (user_id, display_name, access_token_enc, refresh_token_enc, token_expires_at)
-    VALUES (?, ?, ?, ?, ?)
+    INSERT INTO users (user_id, display_name, access_token_enc, refresh_token_enc, token_expires_at, token_dead)
+    VALUES (?, ?, ?, ?, ?, 0)
     ON CONFLICT(user_id) DO UPDATE SET
       display_name      = excluded.display_name,
       access_token_enc  = excluded.access_token_enc,
       refresh_token_enc = excluded.refresh_token_enc,
-      token_expires_at  = excluded.token_expires_at
+      token_expires_at  = excluded.token_expires_at,
+      token_dead        = 0
   `).run(userId, displayName, accessTokenEnc, refreshTokenEnc, tokenExpiresAt);
+}
+
+function markUserTokenDead(userId) {
+  return db.prepare('UPDATE users SET token_dead = 1 WHERE user_id = ?').run(userId);
 }
 
 function getUser(userId) {
@@ -366,6 +374,7 @@ function getAllUsersWithLinks() {
     SELECT DISTINCT u.*
     FROM users u
     INNER JOIN playlist_links pl ON pl.user_id = u.user_id
+    WHERE u.token_dead = 0
   `).all();
 }
 
@@ -424,6 +433,7 @@ module.exports = {
   setSetting,
   // users
   upsertUser,
+  markUserTokenDead,
   getUser,
   deleteUser,
   getAllUsersWithLinks,
