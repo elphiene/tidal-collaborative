@@ -1,20 +1,20 @@
 /* ============================================================
    Tidal Collaborative — Styles
-   Dark theme  |  accent: #1db954
+   Dark theme  |  accent: #4EEDFF (tidal teal)
    ============================================================ */
 
 /* ---- Custom Properties ---- */
 :root {
-  --bg-primary:     #121212;
-  --bg-secondary:   #1a1a1a;
-  --bg-card:        #242424;
-  --bg-card-hover:  #2c2c2c;
-  --bg-input:       #1e1e1e;
-  --bg-overlay:     rgba(0, 0, 0, 0.75);
+  --bg-primary:     #050505;
+  --bg-secondary:   #0d0d0d;
+  --bg-card:        #141414;
+  --bg-card-hover:  #1c1c1c;
+  --bg-input:       #0f0f0f;
+  --bg-overlay:     rgba(0, 0, 0, 0.85);
 
-  --accent:         #1db954;
-  --accent-hover:   #1ed760;
-  --accent-dim:     rgba(29, 185, 84, 0.15);
+  --accent:         #4EEDFF;
+  --accent-hover:   #82F4FF;
+  --accent-dim:     rgba(78, 237, 255, 0.15);
 
   --danger:         #e84040;
   --danger-hover:   #ff5252;
@@ -22,11 +22,11 @@
   --danger-armed:   #ff8c00;
 
   --text-primary:   #ffffff;
-  --text-secondary: #b3b3b3;
-  --text-muted:     #636363;
+  --text-secondary: #999999;
+  --text-muted:     #555555;
 
-  --border:         #333333;
-  --border-focus:   #535353;
+  --border:         #1e1e1e;
+  --border-focus:   #383838;
 
   --radius-sm:      6px;
   --radius:         8px;
@@ -53,7 +53,7 @@ html {
 body {
   background: var(--bg-primary);
   color: var(--text-primary);
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  font-family: 'Space Grotesk', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
   line-height: 1.5;
   min-height: 100vh;
 }
@@ -240,7 +240,7 @@ svg { flex-shrink: 0; }
 .pin-digit:focus {
   outline: none;
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(29, 185, 84, 0.15);
+  box-shadow: 0 0 0 3px var(--accent-dim);
 }
 
 .pin-error {
@@ -330,11 +330,30 @@ svg { flex-shrink: 0; }
   gap: 0.75rem;
 }
 
-.logo-icon {
+.logo-mark {
   width: 32px;
   height: 32px;
   border-radius: var(--radius-sm);
+  background: #000;
+  border: 1px solid var(--border-focus);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: 'Space Grotesk', sans-serif;
+  font-weight: 700;
+  font-size: 1.1rem;
+  color: var(--accent);
+  letter-spacing: -0.04em;
   flex-shrink: 0;
+  user-select: none;
+}
+
+.logo-mark-lg {
+  width: 60px;
+  height: 60px;
+  border-radius: var(--radius-lg);
+  font-size: 2.25rem;
+  border-color: rgba(78, 237, 255, 0.3);
 }
 
 .logo-version {
@@ -361,7 +380,7 @@ svg { flex-shrink: 0; }
   letter-spacing: 0.06em;
   padding: 2px 7px;
   border-radius: 20px;
-  border: 1px solid rgba(29, 185, 84, 0.3);
+  border: 1px solid rgba(78, 237, 255, 0.3);
 }
 
 .header-right {
@@ -395,7 +414,7 @@ svg { flex-shrink: 0; }
 
 .ws-connected .ws-dot {
   background: var(--accent);
-  box-shadow: 0 0 0 0 rgba(29, 185, 84, 0.4);
+  box-shadow: 0 0 0 0 rgba(78, 237, 255, 0.4);
   animation: ws-pulse 2.5s ease-in-out infinite;
 }
 
@@ -405,9 +424,9 @@ svg { flex-shrink: 0; }
 .ws-disconnected .ws-label { color: var(--text-muted); }
 
 @keyframes ws-pulse {
-  0%   { box-shadow: 0 0 0 0   rgba(29, 185, 84, 0.5); }
-  70%  { box-shadow: 0 0 0 7px rgba(29, 185, 84, 0); }
-  100% { box-shadow: 0 0 0 0   rgba(29, 185, 84, 0); }
+  0%   { box-shadow: 0 0 0 0   rgba(78, 237, 255, 0.5); }
+  70%  { box-shadow: 0 0 0 7px rgba(78, 237, 255, 0); }
+  100% { box-shadow: 0 0 0 0   rgba(78, 237, 255, 0); }
 }
 
 /* ---- Main Layout ---- */
@@ -990,7 +1009,7 @@ svg { flex-shrink: 0; }
 .form-input:focus {
   outline: none;
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(29, 185, 84, 0.15);
+  box-shadow: 0 0 0 3px var(--accent-dim);
 }
 
 .form-textarea {

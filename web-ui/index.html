@@ -4,6 +4,9 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Tidal Collaborative</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
@@ -79,10 +82,7 @@
 <!-- ===================== HEADER ===================== -->
 <header class="header">
   <div class="header-left">
-    <svg class="logo-icon" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-      <rect width="32" height="32" rx="8" fill="var(--accent)"/>
-      <path d="M7 16 L10 10 L14 22 L18 13 L21 18 L25 16" stroke="white" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
-    </svg>
+    <div class="logo-mark" aria-hidden="true">T</div>
     <span class="logo-text">Tidal Collaborative</span>
     <span class="logo-version" id="app-version"></span>
   </div>
@@ -106,10 +106,7 @@
 <div id="signed-out-view" class="view" hidden>
   <div class="auth-card">
     <div class="auth-logo">
-      <svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" width="48" height="48">
-        <rect width="32" height="32" rx="8" fill="var(--accent)"/>
-        <path d="M7 16 L10 10 L14 22 L18 13 L21 18 L25 16" stroke="white" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
-      </svg>
+      <div class="logo-mark logo-mark-lg" aria-hidden="true">T</div>
     </div>
     <h1 class="auth-title">Tidal Collaborative</h1>
     <p class="auth-sub">Keep your playlists in sync with friends — no extension required.</p>
