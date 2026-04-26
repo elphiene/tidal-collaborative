@@ -18,32 +18,35 @@ function init() {
 
   db = new Database(config.DB_PATH);
 
-  // Apply schema (idempotent — uses CREATE IF NOT EXISTS throughout)
-  const schema = fs.readFileSync(
-    path.join(__dirname, '../db/init.sql'),
-    'utf8',
-  );
+  const schema = fs.readFileSync(path.join(__dirname, '../db/init.sql'), 'utf8');
   db.exec(schema);
 
-  // Migrations: add new columns if they don't exist (safe to run multiple times)
-  try {
-    db.exec('ALTER TABLE playlist_links ADD COLUMN tidal_playlist_name TEXT');
-  } catch { /* column already exists */ }
-  try {
-    db.exec('ALTER TABLE tracks ADD COLUMN track_title TEXT');
-  } catch { /* column already exists */ }
-  try {
-    db.exec('ALTER TABLE tracks ADD COLUMN track_artist TEXT');
-  } catch { /* column already exists */ }
-  try {
-    db.exec('ALTER TABLE shared_playlists ADD COLUMN created_by TEXT');
-  } catch { /* column already exists */ }
-  try {
-    db.exec('ALTER TABLE shared_playlists ADD COLUMN is_public INTEGER NOT NULL DEFAULT 0');
-  } catch { /* column already exists */ }
-  try {
-    db.exec('ALTER TABLE users ADD COLUMN token_dead INTEGER NOT NULL DEFAULT 0');
-  } catch { /* column already exists */ }
+  runMigrations();
+
+  console.log(`[db] opened ${config.DB_PATH}`);
+  return db;
+}
+
+function runMigrations() {
+  // Column additions — safe to run multiple times; error = already exists
+  const columnMigrations = [
+    'ALTER TABLE playlist_links ADD COLUMN tidal_playlist_name TEXT',
+    'ALTER TABLE tracks ADD COLUMN track_title TEXT',
+    'ALTER TABLE tracks ADD COLUMN track_artist TEXT',
+    'ALTER TABLE shared_playlists ADD COLUMN created_by TEXT',
+    'ALTER TABLE shared_playlists ADD COLUMN is_public INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE users ADD COLUMN token_dead INTEGER NOT NULL DEFAULT 0',
+    "ALTER TABLE users ADD COLUMN sync_status TEXT NOT NULL DEFAULT 'ok'",
+    'ALTER TABLE users ADD COLUMN sync_error_msg TEXT',
+    'ALTER TABLE users ADD COLUMN sync_retry_after INTEGER',
+    'ALTER TABLE playlist_links ADD COLUMN scan_cursor TEXT',
+    'ALTER TABLE playlist_links ADD COLUMN last_polled_at INTEGER',
+  ];
+  for (const sql of columnMigrations) {
+    try { db.exec(sql); } catch { /* already exists */ }
+  }
+
+  // Ensure playlist_invites table exists (predates init.sql entry)
   try {
     db.exec(`CREATE TABLE IF NOT EXISTS playlist_invites (
       id                 INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -56,23 +59,50 @@ function init() {
     db.exec('CREATE INDEX IF NOT EXISTS idx_invites_code ON playlist_invites(code)');
   } catch { /* already exists */ }
 
-  // Backfill created_by for legacy playlists (pre-dating the column)
+  // Backfill created_by for legacy playlists
   try {
     db.exec(`
       UPDATE shared_playlists
       SET created_by = (
         SELECT user_id FROM playlist_links
         WHERE shared_playlist_id = shared_playlists.id
-        ORDER BY created_at ASC
-        LIMIT 1
+        ORDER BY created_at ASC LIMIT 1
       )
       WHERE created_by IS NULL
         AND id IN (SELECT DISTINCT shared_playlist_id FROM playlist_links)
     `);
   } catch { /* ignore */ }
 
-  console.log(`[db] opened ${config.DB_PATH}`);
-  return db;
+  // Migrate old token_dead flag into sync_status
+  try {
+    db.exec(`UPDATE users SET sync_status = 'token_revoked' WHERE token_dead = 1 AND sync_status = 'ok'`);
+  } catch { /* ignore */ }
+
+  // Deduplicate active tracks, then enforce uniqueness via partial index.
+  // Keep the earliest insertion (MIN id) for each active (playlist, track) pair.
+  try {
+    db.exec(`
+      DELETE FROM tracks
+      WHERE removed_at IS NULL
+        AND id NOT IN (
+          SELECT MIN(id) FROM tracks
+          WHERE removed_at IS NULL
+          GROUP BY shared_playlist_id, tidal_track_id
+        )
+    `);
+    db.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_tracks_active_unique
+      ON tracks(shared_playlist_id, tidal_track_id)
+      WHERE removed_at IS NULL
+    `);
+  } catch (e) {
+    console.warn('[db] unique index migration warning:', e.message);
+  }
+
+  // Default settings
+  try {
+    db.exec(`INSERT OR IGNORE INTO settings(key, value) VALUES('poll_interval_ms', '30000')`);
+  } catch { /* ignore */ }
 }
 
 function close() {
@@ -88,7 +118,6 @@ function close() {
 
 function getSharedPlaylists(userId = null) {
   if (!userId) {
-    // Admin call — return all
     return db.prepare(`
       SELECT sp.*,
         COUNT(DISTINCT pl.user_id)                                     AS user_count,
@@ -99,7 +128,6 @@ function getSharedPlaylists(userId = null) {
       GROUP BY sp.id ORDER BY sp.created_at DESC
     `).all();
   }
-  // User call — return only playlists they created or are linked to
   return db.prepare(`
     SELECT sp.*,
       COUNT(DISTINCT pl.user_id)                                     AS user_count,
@@ -202,6 +230,16 @@ function getLinkedUsers(sharedPlaylistId) {
   `).all(sharedPlaylistId);
 }
 
+function setLinkCursor(linkId, cursor) {
+  return db.prepare('UPDATE playlist_links SET scan_cursor = ? WHERE id = ?').run(cursor, linkId);
+}
+
+function clearLinkCursor(linkId) {
+  return db.prepare(
+    'UPDATE playlist_links SET scan_cursor = NULL, last_polled_at = unixepoch() WHERE id = ?',
+  ).run(linkId);
+}
+
 // ---------------------------------------------------------------------------
 // tracks
 // ---------------------------------------------------------------------------
@@ -225,21 +263,30 @@ function getMaxPosition(sharedPlaylistId) {
 }
 
 /**
- * Add a track. Returns the inserted row, or null if the track is already active.
+ * Returns a Set of active tidal_track_ids for a shared playlist.
+ * Used by the poller to diff against current Tidal state.
+ */
+function getActiveTrackIds(sharedPlaylistId) {
+  const rows = db.prepare(`
+    SELECT tidal_track_id FROM tracks
+    WHERE shared_playlist_id = ? AND removed_at IS NULL
+  `).all(sharedPlaylistId);
+  return new Set(rows.map(r => String(r.tidal_track_id)));
+}
+
+/**
+ * Add a track using INSERT OR IGNORE — the partial unique index
+ * (shared_playlist_id, tidal_track_id) WHERE removed_at IS NULL
+ * guarantees atomicity. Returns the new row, or null if already active.
  */
 function addTrack(sharedPlaylistId, tidalTrackId, addedBy, position, trackTitle = null, trackArtist = null) {
-  const existing = db.prepare(`
-    SELECT id FROM tracks
-    WHERE shared_playlist_id = ? AND tidal_track_id = ? AND removed_at IS NULL
-  `).get(sharedPlaylistId, tidalTrackId);
-
-  if (existing) return null;
-
   const info = db.prepare(`
-    INSERT INTO tracks (shared_playlist_id, tidal_track_id, added_by, position, track_title, track_artist)
+    INSERT OR IGNORE INTO tracks
+      (shared_playlist_id, tidal_track_id, added_by, position, track_title, track_artist)
     VALUES (?, ?, ?, ?, ?, ?)
-  `).run(sharedPlaylistId, tidalTrackId, addedBy, position, trackTitle, trackArtist);
+  `).run(sharedPlaylistId, String(tidalTrackId), addedBy, position, trackTitle, trackArtist);
 
+  if (info.changes === 0) return null;
   return db.prepare('SELECT * FROM tracks WHERE id = ?').get(info.lastInsertRowid);
 }
 
@@ -253,9 +300,6 @@ function getTracksWithNullMetadata() {
   `).all();
 }
 
-/**
- * Set title/artist on all rows matching a track ID that still have null titles.
- */
 function updateTrackMetadata(tidalTrackId, title, artist) {
   db.prepare(`
     UPDATE tracks SET track_title = ?, track_artist = ?
@@ -264,32 +308,29 @@ function updateTrackMetadata(tidalTrackId, title, artist) {
 }
 
 /**
- * Soft-delete a track (sets removed_at). Returns the run result.
+ * Soft-delete a track from a shared playlist. Returns the run result.
  */
 function removeTrack(sharedPlaylistId, tidalTrackId) {
   return db.prepare(`
     UPDATE tracks
     SET removed_at = unixepoch()
     WHERE shared_playlist_id = ? AND tidal_track_id = ? AND removed_at IS NULL
-  `).run(sharedPlaylistId, tidalTrackId);
+  `).run(sharedPlaylistId, String(tidalTrackId));
 }
 
 /**
- * Bulk-update track positions.
- * @param {number} sharedPlaylistId
- * @param {Array<{ tidalTrackId: string, position: number }>} positions
+ * Bulk-update track positions within a transaction.
  */
 function updateTrackPositions(sharedPlaylistId, positions) {
   const stmt = db.prepare(`
     UPDATE tracks SET position = ?
     WHERE shared_playlist_id = ? AND tidal_track_id = ? AND removed_at IS NULL
   `);
-  const runAll = db.transaction((items) => {
+  db.transaction((items) => {
     for (const { tidalTrackId, position } of items) {
       stmt.run(position, sharedPlaylistId, tidalTrackId);
     }
-  });
-  runAll(positions);
+  })(positions);
 }
 
 // ---------------------------------------------------------------------------
@@ -336,25 +377,63 @@ function setSetting(key, value) {
   `).run(key, value);
 }
 
+function getPollInterval() {
+  const val = getSetting('poll_interval_ms');
+  return val ? parseInt(val, 10) : 30000;
+}
+
+function setPollInterval(ms) {
+  const clamped = Math.max(15000, Math.min(300000, Number(ms)));
+  return setSetting('poll_interval_ms', String(clamped));
+}
+
 // ---------------------------------------------------------------------------
 // users
 // ---------------------------------------------------------------------------
 
 function upsertUser(userId, displayName, accessTokenEnc, refreshTokenEnc, tokenExpiresAt) {
   return db.prepare(`
-    INSERT INTO users (user_id, display_name, access_token_enc, refresh_token_enc, token_expires_at, token_dead)
-    VALUES (?, ?, ?, ?, ?, 0)
+    INSERT INTO users (user_id, display_name, access_token_enc, refresh_token_enc, token_expires_at, token_dead, sync_status)
+    VALUES (?, ?, ?, ?, ?, 0, 'ok')
     ON CONFLICT(user_id) DO UPDATE SET
       display_name      = excluded.display_name,
       access_token_enc  = excluded.access_token_enc,
       refresh_token_enc = excluded.refresh_token_enc,
       token_expires_at  = excluded.token_expires_at,
-      token_dead        = 0
+      token_dead        = 0,
+      sync_status       = 'ok',
+      sync_error_msg    = NULL,
+      sync_retry_after  = NULL
   `).run(userId, displayName, accessTokenEnc, refreshTokenEnc, tokenExpiresAt);
 }
 
+function setUserSyncStatus(userId, status, errorMsg = null, retryAfter = null) {
+  return db.prepare(`
+    UPDATE users SET sync_status = ?, sync_error_msg = ?, sync_retry_after = ?
+    WHERE user_id = ?
+  `).run(status, errorMsg, retryAfter, userId);
+}
+
+function getUserSyncStatuses() {
+  return db.prepare(`
+    SELECT user_id, display_name, sync_status, sync_error_msg, sync_retry_after
+    FROM users
+    ORDER BY display_name ASC
+  `).all();
+}
+
 function markUserTokenDead(userId) {
-  return db.prepare('UPDATE users SET token_dead = 1 WHERE user_id = ?').run(userId);
+  return db.prepare(`
+    UPDATE users SET token_dead = 1, sync_status = 'token_revoked', sync_error_msg = 'Token revoked or expired'
+    WHERE user_id = ?
+  `).run(userId);
+}
+
+function resetUserSyncStatus(userId) {
+  return db.prepare(`
+    UPDATE users SET sync_status = 'ok', sync_error_msg = NULL, sync_retry_after = NULL, token_dead = 0
+    WHERE user_id = ?
+  `).run(userId);
 }
 
 function getUser(userId) {
@@ -367,14 +446,15 @@ function deleteUser(userId) {
 }
 
 /**
- * Returns all users that have at least one playlist link (i.e., need polling).
+ * Returns all users with at least one playlist link, excluding those with revoked tokens.
+ * Rate-limited users are included — the poller checks retry_after itself.
  */
 function getAllUsersWithLinks() {
   return db.prepare(`
     SELECT DISTINCT u.*
     FROM users u
     INNER JOIN playlist_links pl ON pl.user_id = u.user_id
-    WHERE u.token_dead = 0
+    WHERE u.sync_status != 'token_revoked'
   `).all();
 }
 
@@ -411,6 +491,9 @@ function getAllUsersWithPresence() {
     SELECT u.user_id,
            u.display_name,
            u.created_at,
+           u.sync_status,
+           u.sync_error_msg,
+           u.sync_retry_after,
            COUNT(DISTINCT pl.id) AS linked_count,
            MAX(au.last_seen)     AS last_seen
     FROM users u
@@ -431,9 +514,14 @@ module.exports = {
   // settings
   getSetting,
   setSetting,
+  getPollInterval,
+  setPollInterval,
   // users
   upsertUser,
   markUserTokenDead,
+  resetUserSyncStatus,
+  setUserSyncStatus,
+  getUserSyncStatuses,
   getUser,
   deleteUser,
   getAllUsersWithLinks,
@@ -451,8 +539,11 @@ module.exports = {
   getLinkById,
   checkLinkExists,
   getLinkedUsers,
+  setLinkCursor,
+  clearLinkCursor,
   // tracks
   getPlaylistTracks,
+  getActiveTrackIds,
   addTrack,
   removeTrack,
   getTracksWithNullMetadata,

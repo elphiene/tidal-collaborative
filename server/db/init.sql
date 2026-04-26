@@ -26,24 +26,28 @@ CREATE TABLE IF NOT EXISTS playlist_invites (
 
 -- Each user's local Tidal playlist linked to a shared playlist
 CREATE TABLE IF NOT EXISTS playlist_links (
-  id                 INTEGER PRIMARY KEY AUTOINCREMENT,
-  shared_playlist_id INTEGER NOT NULL REFERENCES shared_playlists(id) ON DELETE CASCADE,
-  user_id            TEXT    NOT NULL,  -- Tidal user ID
-  tidal_playlist_id  TEXT    NOT NULL,  -- local Tidal playlist UUID
-  tidal_playlist_name TEXT,             -- local Tidal playlist name (for display)
-  created_at         INTEGER NOT NULL DEFAULT (unixepoch()),
+  id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+  shared_playlist_id  INTEGER NOT NULL REFERENCES shared_playlists(id) ON DELETE CASCADE,
+  user_id             TEXT    NOT NULL,
+  tidal_playlist_id   TEXT    NOT NULL,
+  tidal_playlist_name TEXT,
+  scan_cursor         TEXT,             -- persisted pagination cursor; NULL = start from beginning
+  last_polled_at      INTEGER,          -- epoch seconds of last completed poll
+  created_at          INTEGER NOT NULL DEFAULT (unixepoch()),
   UNIQUE(shared_playlist_id, user_id)
 );
 
--- Track membership in shared playlists (soft-delete for removal history)
+-- Track membership in shared playlists (soft-delete preserves history)
 CREATE TABLE IF NOT EXISTS tracks (
   id                 INTEGER PRIMARY KEY AUTOINCREMENT,
   shared_playlist_id INTEGER NOT NULL REFERENCES shared_playlists(id) ON DELETE CASCADE,
   tidal_track_id     TEXT    NOT NULL,
-  added_by           TEXT    NOT NULL,  -- Tidal user ID
+  added_by           TEXT    NOT NULL,
   position           INTEGER NOT NULL DEFAULT 0,
   added_at           INTEGER NOT NULL DEFAULT (unixepoch()),
-  removed_at         INTEGER             -- NULL = active; set = removed
+  removed_at         INTEGER,           -- NULL = active; epoch seconds = removed
+  track_title        TEXT,
+  track_artist       TEXT
 );
 
 -- WebSocket presence tracking (upserted by WS handler)
@@ -55,7 +59,7 @@ CREATE TABLE IF NOT EXISTS active_users (
   UNIQUE(user_id, shared_playlist_id)
 );
 
--- Key/value store for server configuration (e.g. admin_pin)
+-- Key/value store for server configuration
 CREATE TABLE IF NOT EXISTS settings (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -68,7 +72,11 @@ CREATE TABLE IF NOT EXISTS users (
   access_token_enc  TEXT    NOT NULL,
   refresh_token_enc TEXT    NOT NULL,
   token_expires_at  INTEGER NOT NULL,
-  created_at        INTEGER NOT NULL DEFAULT (unixepoch())
+  created_at        INTEGER NOT NULL DEFAULT (unixepoch()),
+  token_dead        INTEGER NOT NULL DEFAULT 0,
+  sync_status       TEXT    NOT NULL DEFAULT 'ok', -- ok | rate_limited | token_revoked | error
+  sync_error_msg    TEXT,
+  sync_retry_after  INTEGER   -- epoch ms; relevant when sync_status = 'rate_limited'
 );
 
 -- Indexes
@@ -80,3 +88,7 @@ CREATE INDEX IF NOT EXISTS idx_users_user       ON active_users(user_id);
 CREATE INDEX IF NOT EXISTS idx_users_playlist   ON active_users(shared_playlist_id);
 CREATE INDEX IF NOT EXISTS idx_invites_playlist ON playlist_invites(shared_playlist_id);
 CREATE INDEX IF NOT EXISTS idx_invites_code     ON playlist_invites(code);
+
+-- NOTE: The partial unique index on tracks is created in db.js migrations
+-- (after deduplication of any existing data) rather than here.
+-- idx_tracks_active_unique ON tracks(shared_playlist_id, tidal_track_id) WHERE removed_at IS NULL
