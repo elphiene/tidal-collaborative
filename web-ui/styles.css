@@ -1386,3 +1386,183 @@ svg { flex-shrink: 0; }
 
 /* ---- Label optional ---- */
 .label-optional { color: var(--text-muted); font-weight: 400; font-size: 0.78rem; }
+
+/* ---- Sync status banner ---- */
+.sync-banner {
+  background: rgba(255, 165, 0, 0.08);
+  border-bottom: 1px solid rgba(255, 165, 0, 0.25);
+  color: #ffa500;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.55rem 1.5rem;
+  font-size: 0.85rem;
+  font-weight: 500;
+}
+
+.sync-banner-dismiss {
+  margin-left: auto;
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  font-size: 1.1rem;
+  padding: 0 4px;
+  line-height: 1;
+  opacity: 0.65;
+  transition: opacity var(--transition);
+  flex-shrink: 0;
+}
+.sync-banner-dismiss:hover { opacity: 1; }
+
+/* ---- Sync status badge variants ---- */
+.badge-rate-limited {
+  background: rgba(255, 165, 0, 0.15);
+  color: #ffa500;
+}
+.badge-rate-limited::before { background: #ffa500; }
+
+.badge-token-revoked {
+  background: var(--danger-dim);
+  color: var(--danger-hover);
+}
+.badge-token-revoked::before { background: var(--danger-hover); }
+
+/* ---- Hamburger button ---- */
+.hamburger-btn {
+  display: none;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  gap: 5px;
+  width: 40px;
+  height: 40px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 8px;
+  border-radius: var(--radius-sm);
+  transition: background var(--transition);
+  flex-shrink: 0;
+}
+.hamburger-btn:hover { background: rgba(255,255,255,0.06); }
+
+.hamburger-bar {
+  display: block;
+  width: 18px;
+  height: 2px;
+  background: var(--text-secondary);
+  border-radius: 1px;
+  transition: transform 0.22s ease, opacity 0.22s ease;
+}
+
+body.nav-open .hamburger-btn .hamburger-bar:nth-child(1) { transform: translateY(7px) rotate(45deg); }
+body.nav-open .hamburger-btn .hamburger-bar:nth-child(2) { opacity: 0; transform: scaleX(0); }
+body.nav-open .hamburger-btn .hamburger-bar:nth-child(3) { transform: translateY(-7px) rotate(-45deg); }
+
+/* ---- Admin settings panel ---- */
+.settings-panel {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}
+
+.settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1.5rem;
+  padding: 1rem 1.25rem;
+  border-bottom: 1px solid var(--border);
+}
+.settings-row:last-child { border-bottom: none; }
+
+.settings-label {
+  font-size: 0.875rem;
+  font-weight: 600;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  min-width: 0;
+}
+
+.settings-hint {
+  font-size: 0.75rem;
+  font-weight: 400;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+.settings-control {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-shrink: 0;
+}
+
+.settings-number {
+  width: 80px;
+  text-align: center;
+  padding: 0.4rem 0.5rem;
+}
+
+.settings-unit {
+  font-size: 0.875rem;
+  color: var(--text-muted);
+}
+
+/* ---- Mobile nav (hamburger) ---- */
+@media (max-width: 700px) {
+  /* Show hamburger, hide nav tabs by default */
+  .hamburger-btn { display: flex; }
+
+  /* Position nav as full-width dropdown below header */
+  #nav-tabs {
+    position: fixed;
+    top: var(--header-h);
+    left: 0;
+    right: 0;
+    flex-direction: column !important;
+    background: var(--bg-secondary);
+    border-bottom: 2px solid var(--border);
+    z-index: 99;
+    padding: 0.4rem 0;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+    display: none !important;
+  }
+
+  body.nav-open #nav-tabs { display: flex !important; }
+
+  .nav-tab {
+    height: auto;
+    min-height: 48px;
+    padding: 0.875rem 1.25rem;
+    text-align: left;
+    border-bottom: none !important;
+    border-left: 3px solid transparent;
+    font-size: 0.9rem;
+    justify-content: flex-start;
+  }
+
+  .nav-tab-active {
+    border-left-color: var(--accent) !important;
+    color: var(--accent);
+    background: rgba(78, 237, 255, 0.06);
+  }
+
+  /* Ensure min touch targets everywhere on mobile */
+  .btn { min-height: 44px; }
+  .hamburger-btn { min-height: 44px; width: 44px; }
+
+  /* Admin settings: stack on mobile */
+  .settings-row { flex-direction: column; align-items: flex-start; gap: 0.75rem; }
+  .settings-control { width: 100%; }
+
+  /* Sync banner padding */
+  .sync-banner { padding: 0.55rem 0.75rem; }
+
+  /* Tracks table: hide Added At on mobile (column 4) so delete btn stays */
+  .tracks-table th:nth-child(4),
+  .tracks-table td:nth-child(4) { display: none; }
+}
