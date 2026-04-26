@@ -93,6 +93,11 @@
     <button class="nav-tab" data-view="admin">Admin</button>
   </div>
   <div class="header-right">
+    <button id="hamburger-btn" class="hamburger-btn" aria-label="Open menu" aria-expanded="false" aria-controls="nav-tabs">
+      <span class="hamburger-bar"></span>
+      <span class="hamburger-bar"></span>
+      <span class="hamburger-bar"></span>
+    </button>
     <div id="ws-status" class="ws-status ws-disconnected">
       <span class="ws-dot"></span>
       <span class="ws-label">Connecting…</span>
@@ -101,6 +106,15 @@
     <button id="signout-btn" class="btn btn-ghost btn-sm" hidden>Sign out</button>
   </div>
 </header>
+
+<!-- ===================== SYNC BANNER ===================== -->
+<div id="sync-banner" class="sync-banner" hidden role="alert">
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+    <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0zM12 9v4M12 17h.01"/>
+  </svg>
+  <span id="sync-banner-text">Sync issue detected.</span>
+  <button id="sync-banner-dismiss" class="sync-banner-dismiss" aria-label="Dismiss">&times;</button>
+</div>
 
 <!-- ===================== SIGNED-OUT VIEW ===================== -->
 <div id="signed-out-view" class="view" hidden>
@@ -183,6 +197,36 @@
 <!-- ===================== ADMIN VIEW ===================== -->
 <div id="admin-view" class="view" hidden>
   <main class="main">
+
+    <!-- Settings -->
+    <section class="section">
+      <div class="section-header">
+        <h2 class="section-title">Settings</h2>
+      </div>
+      <div class="settings-panel">
+        <div class="settings-row">
+          <div class="settings-label">
+            Poll interval
+            <span class="settings-hint">How often to check Tidal for new tracks (15–300 seconds)</span>
+          </div>
+          <div class="settings-control">
+            <input class="form-input settings-number" id="poll-interval-input"
+                   type="number" min="15" max="300" value="30" />
+            <span class="settings-unit">s</span>
+            <button class="btn btn-secondary btn-sm" id="poll-interval-save-btn">Save</button>
+          </div>
+        </div>
+        <div class="settings-row">
+          <div class="settings-label">
+            Force poll
+            <span class="settings-hint">Immediately trigger a sync cycle for all users</span>
+          </div>
+          <div class="settings-control">
+            <button class="btn btn-secondary btn-sm" id="force-poll-btn">Force Poll Now</button>
+          </div>
+        </div>
+      </div>
+    </section>
 
     <!-- Stats -->
     <section class="stats-grid" aria-label="Server statistics">

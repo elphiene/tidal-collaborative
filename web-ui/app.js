@@ -58,6 +58,13 @@ const state = {
   wsDisconnectTimer:  null,
   pollTimer:          null,
   sessionCheckTimer:  null,
+
+  // Sync health (userId → { status, sync_error_msg, sync_retry_after })
+  syncStatuses:  new Map(),
+  adminSettings: { poll_interval_ms: 30000 },
+
+  // Mobile nav
+  navOpen: false,
 };
 
 // ---------------------------------------------------------------------------
@@ -170,6 +177,18 @@ document.addEventListener('DOMContentLoaded', async () => {
   apiFetch(`${BASE_URL}/api/ping`).then((r) => r.json()).then((d) => {
     if (d.version) document.getElementById('app-version').textContent = `v${d.version}`;
   }).catch(() => {});
+
+  // Hamburger (mobile nav toggle)
+  document.getElementById('hamburger-btn').addEventListener('click', toggleMobileNav);
+
+  // Sync banner dismiss
+  document.getElementById('sync-banner-dismiss').addEventListener('click', hideSyncBanner);
+
+  // Admin settings buttons (always in DOM, wired once)
+  document.getElementById('poll-interval-save-btn').addEventListener('click', handlePollIntervalSave);
+  document.getElementById('force-poll-btn').addEventListener('click', () => {
+    handleForcePoll(document.getElementById('force-poll-btn'));
+  });
 
   // Run setup wizard check — calls checkAuth() when complete
   await initSetupWizard();
@@ -442,6 +461,8 @@ function showSignedOut() {
   document.getElementById('signout-btn').hidden       = true;
   clearInterval(state.usersViewTimer);
   state.usersViewTimer = null;
+  hideSyncBanner();
+  closeMobileNav();
   setWsStatus(false);
 }
 
@@ -468,6 +489,8 @@ function showSignedIn() {
 }
 
 async function switchView(viewName) {
+  closeMobileNav();
+
   if (viewName === 'admin') {
     const ok = await ensureAdminAuthed();
     if (!ok) return;
@@ -1331,7 +1354,7 @@ async function loadTidalPlaylistsInto(listElId, onSelect) {
 // ---------------------------------------------------------------------------
 
 async function refreshAdmin() {
-  await Promise.allSettled([fetchPlaylists(), fetchUsers()]);
+  await Promise.allSettled([fetchPlaylists(), fetchUsers(), fetchAdminSettings()]);
 }
 
 async function fetchPlaylists() {
@@ -1536,6 +1559,24 @@ function renderUsers() {
   const rows = state.users.map((u) => {
     const fiveMinsAgo = Math.floor(Date.now() / 1000) - 300;
     const isOnline    = u.last_seen >= fiveMinsAgo;
+
+    let syncBadge;
+    const syncStatus = u.sync_status ?? 'ok';
+    if (syncStatus === 'rate_limited') {
+      syncBadge = '<span class="status-badge badge-rate-limited" title="Rate limited by Tidal">Rate limited</span>';
+    } else if (syncStatus === 'token_revoked') {
+      syncBadge = '<span class="status-badge badge-token-revoked" title="Token revoked — user must re-authenticate">Revoked</span>';
+    } else if (syncStatus === 'error') {
+      const msg = escHtml(u.sync_error_msg ?? 'Error');
+      syncBadge = `<span class="status-badge badge-offline" title="${msg}">Error</span>`;
+    } else {
+      syncBadge = '<span class="status-badge badge-online">OK</span>';
+    }
+
+    const resetBtn = syncStatus !== 'ok'
+      ? `<button class="btn btn-ghost btn-sm btn-xs" data-reset-sync="${escHtml(u.user_id ?? u.display_name)}">Reset</button>`
+      : '';
+
     return `
       <tr>
         <td>${escHtml(u.display_name)}</td>
@@ -1546,6 +1587,7 @@ function renderUsers() {
             ${isOnline ? 'Active' : 'Away'}
           </span>
         </td>
+        <td style="white-space:nowrap">${syncBadge} ${resetBtn}</td>
       </tr>`;
   }).join('');
 
@@ -1556,11 +1598,16 @@ function renderUsers() {
           <th>User</th>
           <th>Playlist</th>
           <th>Last Seen</th>
-          <th>Status</th>
+          <th>Presence</th>
+          <th>Sync</th>
         </tr>
       </thead>
       <tbody>${rows}</tbody>
     </table>`;
+
+  list.querySelectorAll('[data-reset-sync]').forEach((btn) => {
+    btn.addEventListener('click', () => handleAdminResetSync(btn.dataset.resetSync, btn));
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -1704,10 +1751,11 @@ function renderLinkedUsersInModal(users) {
 }
 
 function renderTracksInModal(tracks, pl) {
-  const body = document.getElementById('view-modal-body');
+  const tabEl = document.getElementById('tab-tracks');
+  if (!tabEl) return;
 
   if (tracks.length === 0) {
-    body.innerHTML = `
+    tabEl.innerHTML = `
       <div class="empty-state">
         <div class="empty-icon">🎵</div>
         <p class="empty-title">No tracks yet</p>
@@ -1732,10 +1780,16 @@ function renderTracksInModal(tracks, pl) {
       <td class="track-name">${trackDisplay}</td>
       <td>${escHtml(t.added_by_name)}</td>
       <td class="text-muted">${formatDate(t.added_at)}</td>
+      <td>
+        <button class="btn btn-danger btn-sm btn-xs"
+                data-delete-track="${escHtml(String(t.tidal_track_id))}"
+                data-playlist-id="${pl.id}"
+                data-armed="false">Remove</button>
+      </td>
     </tr>`;
   }).join('');
 
-  body.innerHTML = `
+  tabEl.innerHTML = `
     <table class="tracks-table">
       <thead>
         <tr>
@@ -1743,10 +1797,16 @@ function renderTracksInModal(tracks, pl) {
           <th>Track</th>
           <th>Added By</th>
           <th>Added At</th>
+          <th></th>
         </tr>
       </thead>
       <tbody>${rows}</tbody>
     </table>`;
+
+  tabEl.querySelectorAll('[data-delete-track]').forEach((btn) => {
+    btn.addEventListener('click', () =>
+      handleDeleteTrack(parseInt(btn.dataset.playlistId, 10), btn.dataset.deleteTrack, btn));
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -1781,6 +1841,13 @@ function connectWebSocket() {
       if (['track_added', 'track_removed', 'tracks_reordered'].includes(msg.type)) {
         if (state.view === 'admin') fetchPlaylists();
         showSyncNotification(msg);
+      } else if (msg.type === 'sync_status') {
+        handleSyncStatus(msg);
+      } else if (msg.type === 'settings_updated') {
+        if (msg.key === 'poll_interval_ms') {
+          state.adminSettings.poll_interval_ms = Number(msg.value);
+          renderAdminSettings();
+        }
       }
     } catch { /* ignore malformed messages */ }
   };
@@ -1914,4 +1981,202 @@ function timeAgo(unixSecs) {
   if (diff < 3600)  return `${Math.floor(diff / 60)}m ago`;
   if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
   return `${Math.floor(diff / 86400)}d ago`;
+}
+
+// ---------------------------------------------------------------------------
+// Mobile nav
+// ---------------------------------------------------------------------------
+
+function toggleMobileNav() {
+  state.navOpen = !state.navOpen;
+  document.body.classList.toggle('nav-open', state.navOpen);
+  document.getElementById('hamburger-btn').setAttribute('aria-expanded', String(state.navOpen));
+}
+
+function closeMobileNav() {
+  if (!state.navOpen) return;
+  state.navOpen = false;
+  document.body.classList.remove('nav-open');
+  const btn = document.getElementById('hamburger-btn');
+  if (btn) btn.setAttribute('aria-expanded', 'false');
+}
+
+// ---------------------------------------------------------------------------
+// Sync status
+// ---------------------------------------------------------------------------
+
+function handleSyncStatus(msg) {
+  if (msg.user_id) {
+    state.syncStatuses.set(String(msg.user_id), {
+      status:           msg.status,
+      sync_error_msg:   msg.message,
+      sync_retry_after: msg.retry_after,
+    });
+  }
+
+  const hasIssue = msg.status === 'rate_limited' || msg.status === 'token_revoked' || msg.status === 'error';
+
+  if (hasIssue) {
+    showSyncBanner(msg);
+  } else {
+    const anyIssue = [...state.syncStatuses.values()].some(
+      (s) => s.status === 'rate_limited' || s.status === 'token_revoked' || s.status === 'error',
+    );
+    if (!anyIssue) hideSyncBanner();
+  }
+
+  if (state.view === 'admin') fetchUsers();
+}
+
+function showSyncBanner(msg) {
+  const banner = document.getElementById('sync-banner');
+  const text   = document.getElementById('sync-banner-text');
+  if (!banner || !text) return;
+
+  if (msg.status === 'rate_limited') {
+    text.textContent = 'Sync is rate-limited by Tidal. Polling is paused temporarily.';
+  } else if (msg.status === 'token_revoked') {
+    text.textContent = 'A user token was revoked — that user must re-authenticate.';
+  } else {
+    text.textContent = msg.message ?? 'Sync error — check the admin panel.';
+  }
+
+  banner.hidden = false;
+}
+
+function hideSyncBanner() {
+  const banner = document.getElementById('sync-banner');
+  if (banner) banner.hidden = true;
+}
+
+// ---------------------------------------------------------------------------
+// Admin settings
+// ---------------------------------------------------------------------------
+
+async function fetchAdminSettings() {
+  try {
+    const res = await apiFetch(`${BASE_URL}/api/admin/settings`);
+    if (!res.ok) return;
+    const data = await res.json();
+    state.adminSettings = { ...state.adminSettings, ...data };
+    renderAdminSettings();
+  } catch { /* silent — not admin-authed */ }
+}
+
+function renderAdminSettings() {
+  const msEl = document.getElementById('poll-interval-input');
+  if (msEl) msEl.value = Math.round(state.adminSettings.poll_interval_ms / 1000);
+}
+
+async function handleForcePoll(btn) {
+  btn.disabled    = true;
+  btn.textContent = 'Polling…';
+  try {
+    const res = await apiFetch(`${BASE_URL}/api/admin/force-poll`, { method: 'POST' });
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}));
+      throw new Error(d.error ?? `HTTP ${res.status}`);
+    }
+    toast('Force poll triggered', 'success');
+  } catch (err) {
+    toast(`Force poll failed: ${err.message}`, 'error');
+  } finally {
+    btn.disabled    = false;
+    btn.textContent = 'Force Poll Now';
+  }
+}
+
+async function handlePollIntervalSave() {
+  const msEl = document.getElementById('poll-interval-input');
+  if (!msEl) return;
+  const secs = parseInt(msEl.value, 10);
+  if (isNaN(secs) || secs < 15 || secs > 300) {
+    toast('Poll interval must be between 15 and 300 seconds', 'error');
+    return;
+  }
+  const btn = document.getElementById('poll-interval-save-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+  try {
+    const res = await apiFetch(`${BASE_URL}/api/admin/settings`, {
+      method:  'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ poll_interval_ms: secs * 1000 }),
+    });
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}));
+      throw new Error(d.error ?? `HTTP ${res.status}`);
+    }
+    state.adminSettings.poll_interval_ms = secs * 1000;
+    toast(`Poll interval set to ${secs}s`, 'success');
+  } catch (err) {
+    toast(`Failed to update: ${err.message}`, 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Save'; }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Track delete (admin view modal)
+// ---------------------------------------------------------------------------
+
+async function handleDeleteTrack(playlistId, trackId, btn) {
+  if (btn.dataset.armed !== 'true') {
+    btn.dataset.armed = 'true';
+    btn.textContent   = 'Confirm?';
+    setTimeout(() => {
+      if (btn.dataset.armed === 'true') {
+        btn.dataset.armed = 'false';
+        btn.textContent   = 'Remove';
+      }
+    }, 3000);
+    return;
+  }
+
+  btn.disabled    = true;
+  btn.textContent = '…';
+
+  try {
+    const res = await apiFetch(
+      `${BASE_URL}/api/shared-playlists/${playlistId}/tracks/${encodeURIComponent(trackId)}`,
+      { method: 'DELETE' },
+    );
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}));
+      throw new Error(d.error ?? `HTTP ${res.status}`);
+    }
+    btn.closest('tr').remove();
+    toast('Track removed from all linked playlists', 'info');
+    if (state.view === 'admin') fetchPlaylists();
+  } catch (err) {
+    toast(`Remove failed: ${err.message}`, 'error');
+    btn.disabled      = false;
+    btn.textContent   = 'Remove';
+    btn.dataset.armed = 'false';
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Admin: reset user sync status
+// ---------------------------------------------------------------------------
+
+async function handleAdminResetSync(userId, btn) {
+  btn.disabled    = true;
+  btn.textContent = '…';
+  try {
+    const res = await apiFetch(
+      `${BASE_URL}/api/admin/users/${encodeURIComponent(userId)}/reset-sync`,
+      { method: 'POST' },
+    );
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}));
+      throw new Error(d.error ?? `HTTP ${res.status}`);
+    }
+    toast('Sync status reset for user', 'success');
+    state.syncStatuses.delete(String(userId));
+    await fetchUsers();
+  } catch (err) {
+    toast(`Reset failed: ${err.message}`, 'error');
+    btn.disabled    = false;
+    btn.textContent = 'Reset';
+  }
 }
