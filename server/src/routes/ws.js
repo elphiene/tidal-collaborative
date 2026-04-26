@@ -3,158 +3,100 @@
 const { WebSocketServer } = require('ws');
 const db = require('../db');
 
-// ---------------------------------------------------------------------------
-// State
-// ---------------------------------------------------------------------------
-
 /** Active authenticated connections. userId (string) -> WebSocket */
 const clients = new Map();
 
-// ---------------------------------------------------------------------------
-// Init
-// ---------------------------------------------------------------------------
-
 /**
  * Attach a WebSocket server to an existing HTTP server on the /ws path.
- * Accepts sessionParser so req.session is populated on upgrade.
  * @param {import('http').Server} httpServer
  * @param {Function} sessionParser  express-session middleware
  * @returns {WebSocketServer}
  */
 function initWebSocket(httpServer, sessionParser) {
-  // Create without `server` so we can handle the upgrade manually (to inject session)
   const wss = new WebSocketServer({ noServer: true, path: '/ws' });
 
   httpServer.on('upgrade', (req, socket, head) => {
-    if (req.url !== '/ws') {
-      socket.destroy();
-      return;
-    }
-    // Run session middleware on the upgrade request so req.session is populated
+    if (req.url !== '/ws') { socket.destroy(); return; }
     sessionParser(req, {}, () => {
-      wss.handleUpgrade(req, socket, head, (ws) => {
-        wss.emit('connection', ws, req);
-      });
+      wss.handleUpgrade(req, socket, head, ws => wss.emit('connection', ws, req));
     });
-  });
-
-  wss.on('listening', () => {
-    console.log('[ws] listening on /ws');
   });
 
   wss.on('connection', (ws, req) => {
     const ip = req.socket.remoteAddress ?? 'unknown';
     console.log(`[ws] new connection from ${ip}`);
 
-    // Auth via session (sessionParser runs before handleUpgrade in index.js)
-    const sessionUserId = req.session?.userId ?? null;
-    ws.userId          = sessionUserId;
-    ws.isAuthenticated = !!sessionUserId;
+    ws.userId          = req.session?.userId ?? null;
+    ws.isAuthenticated = !!ws.userId;
 
     if (ws.userId) {
-      // Close any pre-existing connection for this user
       const existing = clients.get(ws.userId);
       if (existing && existing !== ws && existing.readyState === existing.OPEN) {
         console.log(`[ws] replacing stale connection for user ${ws.userId}`);
         existing.close(1000, 'Replaced by newer connection');
       }
-
       clients.set(ws.userId, ws);
 
-      // Update presence for all linked playlists
       try {
         const links = db.getUserLinks(ws.userId);
-        for (const link of links) {
-          db.updateUserLastSeen(ws.userId, link.shared_playlist_id);
-        }
+        for (const link of links) db.updateUserLastSeen(ws.userId, link.shared_playlist_id);
       } catch (err) {
         console.warn(`[ws] presence update failed for ${ws.userId}: ${err.message}`);
       }
 
-      console.log(`[ws] user ${ws.userId} connected via session (${clients.size} online)`);
+      console.log(`[ws] user ${ws.userId} connected (${clients.size} online)`);
       send(ws, { type: 'auth_ok', user_id: ws.userId, ts: Date.now() });
     } else {
       console.log(`[ws] unauthenticated connection from ${ip} (no session)`);
     }
 
-    ws.on('message', (raw) => handleMessage(ws, raw));
+    ws.on('message', raw => handleMessage(ws, raw));
 
-    ws.on('close', (code) => {
-      if (ws.userId) {
-        if (clients.get(ws.userId) === ws) {
-          clients.delete(ws.userId);
-        }
-        console.log(`[ws] user ${ws.userId} disconnected (code=${code}, online=${clients.size})`);
-      } else {
-        console.log(`[ws] unauthenticated client disconnected (code=${code})`);
+    ws.on('close', code => {
+      if (ws.userId && clients.get(ws.userId) === ws) {
+        clients.delete(ws.userId);
       }
+      console.log(`[ws] ${ws.userId ?? 'unauthed'} disconnected (code=${code}, online=${clients.size})`);
     });
 
-    ws.on('error', (err) => {
+    ws.on('error', err => {
       console.error(`[ws] socket error (user=${ws.userId ?? 'unauthed'}): ${err.message}`);
     });
   });
 
-  wss.on('error', (err) => {
-    console.error('[ws] server error:', err.message);
-  });
+  wss.on('error', err => console.error('[ws] server error:', err.message));
 
   return wss;
 }
 
 // ---------------------------------------------------------------------------
-// Message dispatcher
+// Message dispatcher — receive-only; only 'auth' message from client is supported
 // ---------------------------------------------------------------------------
 
 function handleMessage(ws, raw) {
   let msg;
-  try {
-    msg = JSON.parse(raw);
-  } catch {
-    return send(ws, { type: 'error', error: 'Invalid JSON' });
-  }
+  try { msg = JSON.parse(raw); }
+  catch { return send(ws, { type: 'error', error: 'Invalid JSON' }); }
 
   const { type, payload } = msg;
-
   if (!type || typeof type !== 'string') {
     return send(ws, { type: 'error', error: 'Missing or invalid message type' });
   }
 
-  // auth is the only message allowed before authentication
-  if (type === 'auth') {
-    return handleAuth(ws, payload);
-  }
+  if (type === 'auth') return handleAuth(ws, payload);
 
-  if (!ws.isAuthenticated) {
-    return send(ws, {
-      type: 'error',
-      error: 'Not authenticated — send { type: "auth", payload: { user_id } } first',
-    });
-  }
-
-  switch (type) {
-    case 'track_added':      return handleTrackAdded(ws, payload);
-    case 'track_removed':    return handleTrackRemoved(ws, payload);
-    case 'tracks_reordered': return handleTracksReordered(ws, payload);
-    default:
-      send(ws, { type: 'error', error: `Unknown message type: "${type}"` });
-  }
+  // All write operations are now REST-only; WebSocket is receive-only
+  send(ws, { type: 'error', error: `"${type}" is not supported over WebSocket — use the REST API` });
 }
 
 // ---------------------------------------------------------------------------
-// Handler: auth
+// Handler: auth (fallback for clients that need explicit auth after connect)
 // ---------------------------------------------------------------------------
 
-/**
- * Payload: { user_id: string, shared_playlist_ids?: Array<number> }
- */
 function handleAuth(ws, payload) {
   const userId = payload?.user_id?.trim?.();
-  if (!userId) {
-    return send(ws, { type: 'error', error: 'auth requires payload.user_id' });
-  }
+  if (!userId) return send(ws, { type: 'error', error: 'auth requires payload.user_id' });
 
-  // Close any pre-existing connection for this user
   const existing = clients.get(userId);
   if (existing && existing !== ws && existing.readyState === existing.OPEN) {
     console.log(`[ws] replacing stale connection for user ${userId}`);
@@ -165,239 +107,68 @@ function handleAuth(ws, payload) {
   ws.isAuthenticated = true;
   clients.set(userId, ws);
 
-  // Best-effort presence update for all linked playlists
-  const playlistIds = Array.isArray(payload?.shared_playlist_ids)
-    ? payload.shared_playlist_ids
-    : [];
-
+  const playlistIds = Array.isArray(payload?.shared_playlist_ids) ? payload.shared_playlist_ids : [];
   for (const id of playlistIds) {
     const spId = parseInt(id, 10);
     if (spId && !isNaN(spId)) {
-      try {
-        db.updateUserLastSeen(userId, spId);
-      } catch (err) {
-        console.warn(`[ws] updateUserLastSeen failed for ${userId} on playlist ${spId}: ${err.message}`);
-      }
+      try { db.updateUserLastSeen(userId, spId); }
+      catch (err) { console.warn(`[ws] updateUserLastSeen failed: ${err.message}`); }
     }
   }
 
-  console.log(`[ws] user ${userId} authenticated (${clients.size} online, ${playlistIds.length} playlists)`);
+  console.log(`[ws] user ${userId} auth'd (${clients.size} online)`);
   send(ws, { type: 'auth_ok', user_id: userId, ts: Date.now() });
-}
-
-// ---------------------------------------------------------------------------
-// Handler: track_added
-// ---------------------------------------------------------------------------
-
-/**
- * Payload: { shared_playlist_id: number, tidal_track_id: string, position?: number }
- */
-function handleTrackAdded(ws, payload) {
-  const { shared_playlist_id, tidal_track_id, position: rawPos } = payload ?? {};
-
-  if (!shared_playlist_id || !tidal_track_id) {
-    return send(ws, {
-      type: 'error',
-      error: 'track_added requires payload.shared_playlist_id and payload.tidal_track_id',
-    });
-  }
-
-  const spId = parseInt(shared_playlist_id, 10);
-  if (isNaN(spId)) return send(ws, { type: 'error', error: 'Invalid shared_playlist_id' });
-
-  // Resolve position: use provided value, or append after last track
-  let position;
-  try {
-    position = rawPos != null ? parseInt(rawPos, 10) : db.getMaxPosition(spId) + 1;
-  } catch (err) {
-    console.error(`[ws] getMaxPosition error (playlist=${spId}): ${err.message}`);
-    return send(ws, { type: 'error', error: 'Database error' });
-  }
-
-  let track;
-  try {
-    track = db.addTrack(spId, String(tidal_track_id), ws.userId, position);
-  } catch (err) {
-    console.error(`[ws] addTrack error (playlist=${spId}): ${err.message}`);
-    return send(ws, { type: 'error', error: 'Database error' });
-  }
-
-  if (!track) {
-    // Track already active in this playlist — idempotent, no broadcast needed
-    console.log(`[ws] track ${tidal_track_id} already active in playlist ${spId} — skipping`);
-    return send(ws, { type: 'track_already_exists', shared_playlist_id: spId, tidal_track_id });
-  }
-
-  console.log(`[ws] track_added: ${tidal_track_id} → playlist ${spId} by ${ws.userId} @ pos ${track.position}`);
-
-  const outbound = {
-    type:              'track_added',
-    shared_playlist_id: spId,
-    tidal_track_id:    String(tidal_track_id),
-    added_by:          ws.userId,
-    position:          track.position,
-    timestamp:         Date.now(),
-  };
-
-  broadcast(spId, outbound, ws.userId);
-  send(ws, { ...outbound, type: 'track_added_ok' });
-}
-
-// ---------------------------------------------------------------------------
-// Handler: track_removed
-// ---------------------------------------------------------------------------
-
-/**
- * Payload: { shared_playlist_id: number, tidal_track_id: string }
- */
-function handleTrackRemoved(ws, payload) {
-  const { shared_playlist_id, tidal_track_id } = payload ?? {};
-
-  if (!shared_playlist_id || !tidal_track_id) {
-    return send(ws, {
-      type: 'error',
-      error: 'track_removed requires payload.shared_playlist_id and payload.tidal_track_id',
-    });
-  }
-
-  const spId = parseInt(shared_playlist_id, 10);
-  if (isNaN(spId)) return send(ws, { type: 'error', error: 'Invalid shared_playlist_id' });
-
-  let result;
-  try {
-    result = db.removeTrack(spId, String(tidal_track_id));
-  } catch (err) {
-    console.error(`[ws] removeTrack error (playlist=${spId}): ${err.message}`);
-    return send(ws, { type: 'error', error: 'Database error' });
-  }
-
-  if (result.changes === 0) {
-    console.log(`[ws] track_removed: ${tidal_track_id} not found/already removed in playlist ${spId}`);
-    return send(ws, { type: 'error', error: 'Track not found or already removed' });
-  }
-
-  console.log(`[ws] track_removed: ${tidal_track_id} ← playlist ${spId} by ${ws.userId}`);
-
-  const outbound = {
-    type:              'track_removed',
-    shared_playlist_id: spId,
-    tidal_track_id:    String(tidal_track_id),
-    removed_by:        ws.userId,
-    timestamp:         Date.now(),
-  };
-
-  broadcast(spId, outbound, ws.userId);
-  send(ws, { ...outbound, type: 'track_removed_ok' });
-}
-
-// ---------------------------------------------------------------------------
-// Handler: tracks_reordered
-// ---------------------------------------------------------------------------
-
-/**
- * Payload: { shared_playlist_id: number, positions: Array<{ tidal_track_id: string, position: number }> }
- */
-function handleTracksReordered(ws, payload) {
-  const { shared_playlist_id, positions } = payload ?? {};
-
-  if (!shared_playlist_id || !Array.isArray(positions) || positions.length === 0) {
-    return send(ws, {
-      type: 'error',
-      error: 'tracks_reordered requires payload.shared_playlist_id and payload.positions[]',
-    });
-  }
-
-  const spId = parseInt(shared_playlist_id, 10);
-  if (isNaN(spId)) return send(ws, { type: 'error', error: 'Invalid shared_playlist_id' });
-
-  // Validate and normalise each entry before touching the DB
-  const normalised = [];
-  for (const entry of positions) {
-    if (!entry.tidal_track_id || typeof entry.position !== 'number' || !Number.isInteger(entry.position)) {
-      return send(ws, {
-        type: 'error',
-        error: 'Each positions entry needs tidal_track_id (string) and position (integer)',
-      });
-    }
-    normalised.push({ tidalTrackId: String(entry.tidal_track_id), position: entry.position });
-  }
-
-  try {
-    db.updateTrackPositions(spId, normalised);
-  } catch (err) {
-    console.error(`[ws] updateTrackPositions error (playlist=${spId}): ${err.message}`);
-    return send(ws, { type: 'error', error: 'Database error' });
-  }
-
-  console.log(`[ws] tracks_reordered: playlist ${spId} (${positions.length} tracks) by ${ws.userId}`);
-
-  const outbound = {
-    type:              'tracks_reordered',
-    shared_playlist_id: spId,
-    positions,
-    reordered_by:      ws.userId,
-    timestamp:         Date.now(),
-  };
-
-  broadcast(spId, outbound, ws.userId);
-  send(ws, { ...outbound, type: 'tracks_reordered_ok' });
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-/**
- * Send JSON to a single client. Silently drops if the socket is not open.
- * @param {WebSocket} ws
- * @param {object} obj
- */
 function send(ws, obj) {
   if (ws.readyState !== ws.OPEN) return;
-  try {
-    ws.send(JSON.stringify(obj));
-  } catch (err) {
-    console.error(`[ws] send error (user=${ws.userId ?? 'unauthed'}): ${err.message}`);
-  }
+  try { ws.send(JSON.stringify(obj)); }
+  catch (err) { console.error(`[ws] send error (user=${ws.userId ?? 'unauthed'}): ${err.message}`); }
 }
 
 /**
- * Broadcast a message to every user linked to sharedPlaylistId, skipping the sender.
- * @param {number}  sharedPlaylistId
- * @param {object}  message
- * @param {string}  excludeUserId
+ * Broadcast a message to clients.
+ * - sharedPlaylistId = number  → send to all users linked to that playlist
+ * - sharedPlaylistId = null    → send to ALL connected clients (user-level events like sync_status)
+ *
+ * @param {number|null} sharedPlaylistId
+ * @param {object}      message
  */
-function broadcast(sharedPlaylistId, message, excludeUserId) {
+function broadcast(sharedPlaylistId, message) {
+  const json = JSON.stringify(message);
+  let sent = 0;
+
+  if (sharedPlaylistId == null) {
+    // User-level event (sync_status, settings_updated) → broadcast to everyone
+    for (const [, ws] of clients) {
+      if (ws.readyState === ws.OPEN) {
+        try { ws.send(json); sent++; }
+        catch (err) { console.error(`[ws] broadcast all error: ${err.message}`); }
+      }
+    }
+    console.log(`[ws] broadcast type=${message.type} → ${sent} client(s)`);
+    return;
+  }
+
   let links;
-  try {
-    links = db.getPlaylistLinks(sharedPlaylistId);
-  } catch (err) {
+  try { links = db.getPlaylistLinks(sharedPlaylistId); }
+  catch (err) {
     console.error(`[ws] broadcast: getPlaylistLinks error (playlist=${sharedPlaylistId}): ${err.message}`);
     return;
   }
 
-  const json       = JSON.stringify(message);
-  const recipients = links.filter((l) => l.user_id !== excludeUserId);
-  let   sent       = 0;
-
-  for (const link of recipients) {
+  for (const link of links) {
     const target = clients.get(link.user_id);
-    if (!target || target.readyState !== target.OPEN) {
-      console.log(`[ws] broadcast: user ${link.user_id} offline, queuing not supported yet`);
-      continue;
-    }
-    try {
-      target.send(json);
-      sent++;
-    } catch (err) {
-      console.error(`[ws] broadcast: send to ${link.user_id} failed: ${err.message}`);
-    }
+    if (!target || target.readyState !== target.OPEN) continue;
+    try { target.send(json); sent++; }
+    catch (err) { console.error(`[ws] broadcast send to ${link.user_id} failed: ${err.message}`); }
   }
 
-  console.log(
-    `[ws] broadcast type=${message.type} playlist=${sharedPlaylistId} ` +
-    `→ ${sent}/${recipients.length} recipients (${links.length - recipients.length} excluded)`,
-  );
+  console.log(`[ws] broadcast type=${message.type} playlist=${sharedPlaylistId} → ${sent}/${links.length} client(s)`);
 }
 
 module.exports = { initWebSocket, clients, broadcast };
