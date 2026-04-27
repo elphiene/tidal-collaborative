@@ -6,17 +6,11 @@ FROM node:20-alpine AS deps
 
 WORKDIR /app
 
-# curl is needed for the HEALTHCHECK in the final stage
-RUN apk add --no-cache curl
-
 COPY server/package.json server/package-lock.json ./server/
 RUN cd server && npm ci --omit=dev
 
 ## ─── Stage 2: final image ─────────────────────────────────────────────────
 FROM node:20-alpine
-
-# curl for the health check (keep the image lean — no dev tooling)
-RUN apk add --no-cache curl
 
 WORKDIR /app
 
@@ -42,12 +36,13 @@ ENV NODE_ENV=production \
 EXPOSE 3000
 
 # ── Health check ─────────────────────────────────────────────────────────
+# wget is included in Alpine's busybox — no extra package needed.
 # Hits /api/ping every 30 s; gives the server 15 s to warm up on first start.
 HEALTHCHECK \
   --interval=30s \
   --timeout=5s \
   --start-period=15s \
   --retries=3 \
-  CMD curl -fs http://localhost:3000/api/ping | grep -q '"ok":true' || exit 1
+  CMD wget -qO- http://localhost:3000/api/ping | grep -q '"ok":true' || exit 1
 
 CMD ["node", "server/src/index.js"]
