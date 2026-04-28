@@ -275,6 +275,19 @@ function getActiveTrackIds(sharedPlaylistId) {
 }
 
 /**
+ * Returns a Set of ALL tidal_track_ids ever seen for a shared playlist,
+ * including soft-deleted ones. Used by the poller diff so that a webapp
+ * deletion is not resurrected before the Tidal-side removal propagates.
+ */
+function getAllTrackIds(sharedPlaylistId) {
+  const rows = db.prepare(`
+    SELECT DISTINCT tidal_track_id FROM tracks
+    WHERE shared_playlist_id = ?
+  `).all(sharedPlaylistId);
+  return new Set(rows.map(r => String(r.tidal_track_id)));
+}
+
+/**
  * Add a track using INSERT OR IGNORE — the partial unique index
  * (shared_playlist_id, tidal_track_id) WHERE removed_at IS NULL
  * guarantees atomicity. Returns the new row, or null if already active.
@@ -544,6 +557,7 @@ module.exports = {
   // tracks
   getPlaylistTracks,
   getActiveTrackIds,
+  getAllTrackIds,
   addTrack,
   removeTrack,
   getTracksWithNullMetadata,
