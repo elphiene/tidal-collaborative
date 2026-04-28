@@ -275,32 +275,44 @@ function getActiveTrackIds(sharedPlaylistId) {
 }
 
 /**
- * Returns a Set of ALL tidal_track_ids ever seen for a shared playlist,
- * including soft-deleted ones. Used by the poller diff so that a webapp
- * deletion is not resurrected before the Tidal-side removal propagates.
+ * Returns a Set of tidal_track_ids soft-deleted within the last `windowMs` ms.
+ * Used by the poller diff to block resurrection during the propagation window,
+ * while still allowing genuine re-adds after propagation has had time to finish.
  */
-function getAllTrackIds(sharedPlaylistId) {
+function getRecentlyDeletedTrackIds(sharedPlaylistId, windowMs = 10 * 60 * 1000) {
+  const cutoffSec = Math.floor((Date.now() - windowMs) / 1000);
   const rows = db.prepare(`
     SELECT DISTINCT tidal_track_id FROM tracks
-    WHERE shared_playlist_id = ?
-  `).all(sharedPlaylistId);
+    WHERE shared_playlist_id = ? AND removed_at IS NOT NULL AND removed_at > ?
+  `).all(sharedPlaylistId, cutoffSec);
   return new Set(rows.map(r => String(r.tidal_track_id)));
 }
 
 /**
- * Add a track using INSERT OR IGNORE — the partial unique index
- * (shared_playlist_id, tidal_track_id) WHERE removed_at IS NULL
- * guarantees atomicity. Returns the new row, or null if already active.
+ * Add a track, returning the new row or null if already active.
+ * Runs in a transaction: soft-deleted rows for the same track are purged first
+ * so that INSERT OR IGNORE cannot create a duplicate active row alongside them
+ * (the partial unique index only covers removed_at IS NULL, so without the
+ * DELETE step the insert would silently succeed and produce two rows).
  */
 function addTrack(sharedPlaylistId, tidalTrackId, addedBy, position, trackTitle = null, trackArtist = null) {
-  const info = db.prepare(`
-    INSERT OR IGNORE INTO tracks
-      (shared_playlist_id, tidal_track_id, added_by, position, track_title, track_artist)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `).run(sharedPlaylistId, String(tidalTrackId), addedBy, position, trackTitle, trackArtist);
+  const id = String(tidalTrackId);
+  return db.transaction(() => {
+    // Purge any leftover soft-deleted rows for this track before inserting.
+    db.prepare(`
+      DELETE FROM tracks
+      WHERE shared_playlist_id = ? AND tidal_track_id = ? AND removed_at IS NOT NULL
+    `).run(sharedPlaylistId, id);
 
-  if (info.changes === 0) return null;
-  return db.prepare('SELECT * FROM tracks WHERE id = ?').get(info.lastInsertRowid);
+    const info = db.prepare(`
+      INSERT OR IGNORE INTO tracks
+        (shared_playlist_id, tidal_track_id, added_by, position, track_title, track_artist)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(sharedPlaylistId, id, addedBy, position, trackTitle, trackArtist);
+
+    if (info.changes === 0) return null;
+    return db.prepare('SELECT * FROM tracks WHERE id = ?').get(info.lastInsertRowid);
+  })();
 }
 
 /**
@@ -557,7 +569,7 @@ module.exports = {
   // tracks
   getPlaylistTracks,
   getActiveTrackIds,
-  getAllTrackIds,
+  getRecentlyDeletedTrackIds,
   addTrack,
   removeTrack,
   getTracksWithNullMetadata,

@@ -77,6 +77,13 @@ async function propagateAddToOtherUsers(sharedPlaylistId, excludeUserId, trackId
   const links = db.getPlaylistLinks(sharedPlaylistId);
   for (const link of links) {
     if (link.user_id === excludeUserId) continue;
+    // Abort if the track was deleted while we were iterating — prevents a Tidal
+    // add completing *after* propagateRemoveToAllUsers, which would leave a
+    // phantom duplicate in the target Tidal playlist.
+    if (!db.getActiveTrackIds(sharedPlaylistId).has(trackId)) {
+      console.log(`[poller] abort propagate +${trackId} — track deleted mid-propagation`);
+      return;
+    }
     const user = db.getUser(link.user_id);
     if (!user || user.sync_status === 'token_revoked') continue;
     try {
@@ -122,10 +129,12 @@ async function pollPlaylist(link, accessToken, broadcastFn) {
   const { ids: tidalIds, truncated, nextCursor } =
     await tidalGetPlaylistTrackIds(tidalPlaylistId, accessToken, link.scan_cursor ?? null);
 
-  // Diff against all tracks ever seen (including soft-deleted) so that a
-  // webapp deletion is not resurrected before Tidal-side removal propagates.
-  const alreadySynced = db.getAllTrackIds(sharedPlaylistId);
-  const newTrackIds   = [...tidalIds].filter(id => !alreadySynced.has(id));
+  // Exclude active tracks (already synced) and tracks deleted within the last
+  // 10 minutes (grace period covers the async Tidal propagation window while
+  // still allowing a genuinely re-added track to come back after that time).
+  const activeIds  = db.getActiveTrackIds(sharedPlaylistId);
+  const deletedIds = db.getRecentlyDeletedTrackIds(sharedPlaylistId);
+  const newTrackIds = [...tidalIds].filter(id => !activeIds.has(id) && !deletedIds.has(id));
 
   if (newTrackIds.length > 0) {
     console.log(`[poller] "${displayName}": ${newTrackIds.length} new track(s) detected`);
@@ -368,7 +377,8 @@ async function syncPlaylistForLink(link, accessToken) {
   const tidalCounts = new Map();
   for (const id of tidalList) tidalCounts.set(id, (tidalCounts.get(id) ?? 0) + 1);
 
-  const serverIds = db.getActiveTrackIds(sharedPlaylistId);
+  const serverIds  = db.getActiveTrackIds(sharedPlaylistId);
+  const deletedIds = db.getRecentlyDeletedTrackIds(sharedPlaylistId);
   let added = 0, merged = 0, duplicatesFixed = 0;
 
   for (const [id, count] of tidalCounts) {
@@ -380,7 +390,7 @@ async function syncPlaylistForLink(link, accessToken) {
       }
     }
 
-    if (!serverIds.has(id)) {
+    if (!serverIds.has(id) && !deletedIds.has(id)) {
       const { title, artist } = await tidalGetTrackInfo(id, accessToken);
       const maxPos = db.getMaxPosition(sharedPlaylistId);
       const track  = db.addTrack(sharedPlaylistId, id, userId, maxPos + 1, title, artist);
