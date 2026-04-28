@@ -122,8 +122,9 @@ async function pollPlaylist(link, accessToken, broadcastFn) {
   const { ids: tidalIds, truncated, nextCursor } =
     await tidalGetPlaylistTrackIds(tidalPlaylistId, accessToken, link.scan_cursor ?? null);
 
-  // DB is the source of truth — diff against it, not in-memory state
-  const alreadySynced = db.getActiveTrackIds(sharedPlaylistId);
+  // Diff against all tracks ever seen (including soft-deleted) so that a
+  // webapp deletion is not resurrected before Tidal-side removal propagates.
+  const alreadySynced = db.getAllTrackIds(sharedPlaylistId);
   const newTrackIds   = [...tidalIds].filter(id => !alreadySynced.has(id));
 
   if (newTrackIds.length > 0) {
