@@ -31,3 +31,6 @@ npm-debug.log*
 
 # Debug captures
 *.har
+CLAUDE.md
+.claude/
+PLAN.md
