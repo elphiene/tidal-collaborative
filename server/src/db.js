@@ -103,6 +103,55 @@ function runMigrations() {
   try {
     db.exec(`INSERT OR IGNORE INTO settings(key, value) VALUES('poll_interval_ms', '30000')`);
   } catch { /* ignore */ }
+
+  // track_removal_queue and track_events tables (created idempotently via init.sql,
+  // but also ensure they exist for deployments that already ran init.sql before these were added)
+  try {
+    db.exec(`CREATE TABLE IF NOT EXISTS track_removal_queue (
+      id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+      shared_playlist_id INTEGER NOT NULL,
+      tidal_track_id     TEXT    NOT NULL,
+      user_id            TEXT    NOT NULL,
+      deleted_by         TEXT    NOT NULL,
+      created_at         INTEGER NOT NULL DEFAULT (unixepoch()),
+      UNIQUE(shared_playlist_id, tidal_track_id, user_id)
+    )`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_removal_queue_user  ON track_removal_queue(shared_playlist_id, user_id)`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_removal_queue_track ON track_removal_queue(shared_playlist_id, tidal_track_id)`);
+  } catch { /* already exists */ }
+
+  try {
+    db.exec(`CREATE TABLE IF NOT EXISTS track_events (
+      id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+      shared_playlist_id INTEGER NOT NULL,
+      tidal_track_id     TEXT    NOT NULL,
+      event_type         TEXT    NOT NULL,
+      actor_user_id      TEXT,
+      source             TEXT    NOT NULL,
+      target_user_id     TEXT,
+      track_title        TEXT,
+      track_artist       TEXT,
+      timestamp          INTEGER NOT NULL DEFAULT (unixepoch()),
+      notes              TEXT
+    )`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_track_events_pl ON track_events(shared_playlist_id, timestamp DESC)`);
+  } catch { /* already exists */ }
+
+  try {
+    db.exec(`CREATE TABLE IF NOT EXISTS poll_log (
+      id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+      shared_playlist_id INTEGER NOT NULL,
+      user_id            TEXT    NOT NULL,
+      tidal_playlist_id  TEXT    NOT NULL,
+      status             TEXT    NOT NULL,
+      new_tracks         INTEGER NOT NULL DEFAULT 0,
+      removed_tracks     INTEGER NOT NULL DEFAULT 0,
+      queued_removals    INTEGER NOT NULL DEFAULT 0,
+      error_msg          TEXT,
+      timestamp          INTEGER NOT NULL DEFAULT (unixepoch())
+    )`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_poll_log_pl ON poll_log(shared_playlist_id, timestamp DESC)`);
+  } catch { /* already exists */ }
 }
 
 function close() {
@@ -518,6 +567,158 @@ function getAllUsersWithPresence() {
 }
 
 // ---------------------------------------------------------------------------
+// track_removal_queue
+// ---------------------------------------------------------------------------
+
+/**
+ * Write a removal queue entry for every linked user (except excludeUserId).
+ * Called when a track is deleted so the poller can retry removal for users
+ * whose tokens are currently expired.
+ */
+function addToRemovalQueueAllUsers(spId, trackId, deletedBy, excludeUserId = null) {
+  const links = db.prepare('SELECT user_id FROM playlist_links WHERE shared_playlist_id = ?').all(spId);
+  const stmt  = db.prepare(`
+    INSERT OR IGNORE INTO track_removal_queue (shared_playlist_id, tidal_track_id, user_id, deleted_by)
+    VALUES (?, ?, ?, ?)
+  `);
+  for (const link of links) {
+    if (excludeUserId && link.user_id === excludeUserId) continue;
+    stmt.run(spId, String(trackId), link.user_id, deletedBy);
+  }
+}
+
+/** Remove a user's pending removal entry once confirmed gone from their Tidal. */
+function markRemovalComplete(spId, trackId, userId) {
+  return db.prepare(`
+    DELETE FROM track_removal_queue
+    WHERE shared_playlist_id = ? AND tidal_track_id = ? AND user_id = ?
+  `).run(spId, String(trackId), userId);
+}
+
+/** Clear all pending removal entries for a track (called when someone re-adds it). */
+function clearRemovalQueue(spId, trackId) {
+  return db.prepare(`
+    DELETE FROM track_removal_queue
+    WHERE shared_playlist_id = ? AND tidal_track_id = ?
+  `).run(spId, String(trackId));
+}
+
+/** Returns a Set of track IDs that are pending removal for this specific user. */
+function getPendingRemovalsForUser(spId, userId) {
+  const rows = db.prepare(`
+    SELECT tidal_track_id FROM track_removal_queue
+    WHERE shared_playlist_id = ? AND user_id = ?
+  `).all(spId, userId);
+  return new Set(rows.map(r => String(r.tidal_track_id)));
+}
+
+/**
+ * Returns active tracks that meet all conditions for Tidal-side removal detection:
+ * - Active in DB (removed_at IS NULL)
+ * - Added at least gracePeriodSeconds ago (avoids false positives on fresh propagations)
+ * - Link has been fully polled at least once since the track was added (last_polled_at > added_at)
+ * - No pending removal queue entry exists for this user (not already being processed)
+ */
+function getTracksForRemovalDetection(spId, linkId, gracePeriodSeconds) {
+  return db.prepare(`
+    SELECT t.tidal_track_id, t.track_title, t.track_artist
+    FROM tracks t
+    JOIN playlist_links pl ON pl.id = ?
+    WHERE t.shared_playlist_id = ?
+      AND t.removed_at IS NULL
+      AND t.added_at < (unixepoch() - ?)
+      AND pl.last_polled_at IS NOT NULL
+      AND pl.last_polled_at > t.added_at
+      AND NOT EXISTS (
+        SELECT 1 FROM track_removal_queue q
+        WHERE q.shared_playlist_id = t.shared_playlist_id
+          AND q.tidal_track_id = t.tidal_track_id
+          AND q.user_id = pl.user_id
+      )
+  `).all(linkId, spId, gracePeriodSeconds);
+}
+
+// ---------------------------------------------------------------------------
+// track_events (activity log)
+// ---------------------------------------------------------------------------
+
+function logTrackEvent(spId, trackId, eventType, actorUserId, source, targetUserId, trackTitle, trackArtist, notes = null) {
+  try {
+    db.prepare(`
+      INSERT INTO track_events
+        (shared_playlist_id, tidal_track_id, event_type, actor_user_id, source, target_user_id, track_title, track_artist, notes)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      spId, String(trackId), eventType,
+      actorUserId   ?? null, source,
+      targetUserId  ?? null,
+      trackTitle    ?? null,
+      trackArtist   ?? null,
+      notes         ?? null,
+    );
+  } catch (err) {
+    console.warn('[db] logTrackEvent error:', err.message);
+  }
+}
+
+/** Returns events for a playlist since sinceSeconds (unix epoch seconds), newest first. */
+function getTrackEvents(spId, sinceSeconds, limit = 500) {
+  return db.prepare(`
+    SELECT te.*,
+      COALESCE(ua.display_name, te.actor_user_id)   AS actor_display_name,
+      COALESCE(ut.display_name, te.target_user_id)  AS target_display_name
+    FROM track_events te
+    LEFT JOIN users ua ON ua.user_id = te.actor_user_id
+    LEFT JOIN users ut ON ut.user_id = te.target_user_id
+    WHERE te.shared_playlist_id = ?
+      AND te.timestamp >= ?
+    ORDER BY te.timestamp DESC
+    LIMIT ?
+  `).all(spId, sinceSeconds, limit);
+}
+
+/** Delete events older than cutoffSeconds (called periodically to prevent unbounded growth). */
+function pruneTrackEvents(cutoffSeconds) {
+  db.prepare('DELETE FROM track_events WHERE timestamp < ?').run(cutoffSeconds);
+  db.prepare('DELETE FROM poll_log WHERE timestamp < ?').run(cutoffSeconds);
+}
+
+// ---------------------------------------------------------------------------
+// poll_log (sync timing)
+// ---------------------------------------------------------------------------
+
+function writePollLog(spId, userId, tidalPlaylistId, status, counts = {}, errorMsg = null) {
+  try {
+    db.prepare(`
+      INSERT INTO poll_log (shared_playlist_id, user_id, tidal_playlist_id, status, new_tracks, removed_tracks, queued_removals, error_msg)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      spId, userId, tidalPlaylistId, status,
+      counts.newTracks      ?? 0,
+      counts.removedTracks  ?? 0,
+      counts.queuedRemovals ?? 0,
+      errorMsg ?? null,
+    );
+  } catch (err) {
+    console.warn('[db] writePollLog error:', err.message);
+  }
+}
+
+/** Returns poll log entries for a playlist since sinceSeconds, newest first. */
+function getPollLog(spId, sinceSeconds, limit = 200) {
+  return db.prepare(`
+    SELECT pl.*,
+      COALESCE(u.display_name, pl.user_id) AS user_display_name
+    FROM poll_log pl
+    LEFT JOIN users u ON u.user_id = pl.user_id
+    WHERE pl.shared_playlist_id = ?
+      AND pl.timestamp >= ?
+    ORDER BY pl.timestamp DESC
+    LIMIT ?
+  `).all(spId, sinceSeconds, limit);
+}
+
+// ---------------------------------------------------------------------------
 // Exports
 // ---------------------------------------------------------------------------
 
@@ -573,4 +774,17 @@ module.exports = {
   getInvitesByPlaylist,
   getInviteByCode,
   revokeInvite,
+  // track_removal_queue
+  addToRemovalQueueAllUsers,
+  markRemovalComplete,
+  clearRemovalQueue,
+  getPendingRemovalsForUser,
+  getTracksForRemovalDetection,
+  // track_events
+  logTrackEvent,
+  getTrackEvents,
+  pruneTrackEvents,
+  // poll_log
+  writePollLog,
+  getPollLog,
 };

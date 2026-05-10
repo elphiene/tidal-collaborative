@@ -92,3 +92,53 @@ CREATE INDEX IF NOT EXISTS idx_invites_code     ON playlist_invites(code);
 -- NOTE: The partial unique index on tracks is created in db.js migrations
 -- (after deduplication of any existing data) rather than here.
 -- idx_tracks_active_unique ON tracks(shared_playlist_id, tidal_track_id) WHERE removed_at IS NULL
+
+-- Per-user removal queue: ensures deletions complete even when a user's token is temporarily expired.
+-- One row per (track, user) written at deletion time; cleared when the poller confirms the track
+-- is gone from that user's Tidal playlist. While a row exists the poller blocks re-adds for that user.
+CREATE TABLE IF NOT EXISTS track_removal_queue (
+  id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+  shared_playlist_id INTEGER NOT NULL,
+  tidal_track_id     TEXT    NOT NULL,
+  user_id            TEXT    NOT NULL,
+  deleted_by         TEXT    NOT NULL,
+  created_at         INTEGER NOT NULL DEFAULT (unixepoch()),
+  UNIQUE(shared_playlist_id, tidal_track_id, user_id)
+);
+
+-- Activity log: every track add/remove event with actor, source, and optional propagation target.
+-- Pruned automatically after 7 days.
+CREATE TABLE IF NOT EXISTS track_events (
+  id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+  shared_playlist_id INTEGER NOT NULL,
+  tidal_track_id     TEXT    NOT NULL,
+  event_type         TEXT    NOT NULL, -- 'added' | 'removed'
+  actor_user_id      TEXT,             -- NULL = system / background action
+  source             TEXT    NOT NULL, -- 'tidal_poll' | 'webapp' | 'propagation' | 'force_sync' | 'init_link' | 'tidal_removal_detected' | 'removal_queue'
+  target_user_id     TEXT,             -- for propagation/removal_queue events
+  track_title        TEXT,
+  track_artist       TEXT,
+  timestamp          INTEGER NOT NULL DEFAULT (unixepoch()),
+  notes              TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_removal_queue_user  ON track_removal_queue(shared_playlist_id, user_id);
+CREATE INDEX IF NOT EXISTS idx_removal_queue_track ON track_removal_queue(shared_playlist_id, tidal_track_id);
+CREATE INDEX IF NOT EXISTS idx_track_events_pl     ON track_events(shared_playlist_id, timestamp DESC);
+
+-- Lightweight poll-cycle log: one row per link per poll, for sync timing visibility.
+-- Pruned after 7 days alongside track_events.
+CREATE TABLE IF NOT EXISTS poll_log (
+  id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+  shared_playlist_id INTEGER NOT NULL,
+  user_id            TEXT    NOT NULL,
+  tidal_playlist_id  TEXT    NOT NULL,
+  status             TEXT    NOT NULL, -- 'ok' | 'error' | 'rate_limited' | 'token_revoked'
+  new_tracks         INTEGER NOT NULL DEFAULT 0,
+  removed_tracks     INTEGER NOT NULL DEFAULT 0,
+  queued_removals    INTEGER NOT NULL DEFAULT 0,
+  error_msg          TEXT,
+  timestamp          INTEGER NOT NULL DEFAULT (unixepoch())
+);
+
+CREATE INDEX IF NOT EXISTS idx_poll_log_pl ON poll_log(shared_playlist_id, timestamp DESC);

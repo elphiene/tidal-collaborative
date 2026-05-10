@@ -350,6 +350,12 @@ router.delete('/shared-playlists/:id/tracks/:trackId', async (req, res) => {
     if (result.changes === 0) return res.status(404).json({ error: 'Track not found or already removed' });
 
     const removedBy = req.session.userId ?? 'admin';
+
+    // Write removal queue entries for all linked users so the poller will retry
+    // removal for any users whose tokens are currently expired.
+    db.addToRemovalQueueAllUsers(spId, trackId, removedBy);
+    db.logTrackEvent(spId, trackId, 'removed', removedBy, 'webapp', null, null, null);
+
     getBroadcast()(spId, {
       type:               'track_removed',
       shared_playlist_id: spId,
@@ -358,7 +364,8 @@ router.delete('/shared-playlists/:id/tracks/:trackId', async (req, res) => {
       timestamp:          Date.now(),
     });
 
-    // Propagate removal to all linked Tidal playlists (fire-and-forget, non-blocking)
+    // Propagate immediately (best-effort); marks removal complete per-user on success.
+    // Any users where this fails keep their queue entry for poller-based retry.
     propagateRemoveToAllUsers(spId, trackId)
       .catch(err => console.error('[api] propagate remove failed:', err.message));
 
@@ -656,6 +663,51 @@ router.get('/users/all', (req, res) => {
     res.json(db.getAllUsersWithPresence());
   } catch (err) {
     console.error('[api] GET /users/all', err.message);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Admin — activity log
+// ---------------------------------------------------------------------------
+
+// GET /api/admin/track-events?sharedPlaylistId=X[&since=unixSecs][&limit=N]
+// Returns track add/remove events for a playlist, defaulting to last 24 hours.
+router.get('/admin/track-events', (req, res) => {
+  if (!req.session.adminAuthed) return res.status(403).json({ error: 'Admin auth required' });
+
+  const spId = parseInt(req.query.sharedPlaylistId, 10);
+  if (isNaN(spId)) return res.status(400).json({ error: 'sharedPlaylistId is required' });
+
+  const since = req.query.since
+    ? parseInt(req.query.since, 10)
+    : Math.floor(Date.now() / 1000) - 24 * 60 * 60;
+  const limit = Math.min(parseInt(req.query.limit ?? '500', 10), 500);
+
+  try {
+    res.json(db.getTrackEvents(spId, since, limit));
+  } catch (err) {
+    console.error('[api] GET /admin/track-events', err.message);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// GET /api/admin/poll-log?sharedPlaylistId=X[&since=unixSecs]
+// Returns poll cycle history for a playlist (sync timing).
+router.get('/admin/poll-log', (req, res) => {
+  if (!req.session.adminAuthed) return res.status(403).json({ error: 'Admin auth required' });
+
+  const spId = parseInt(req.query.sharedPlaylistId, 10);
+  if (isNaN(spId)) return res.status(400).json({ error: 'sharedPlaylistId is required' });
+
+  const since = req.query.since
+    ? parseInt(req.query.since, 10)
+    : Math.floor(Date.now() / 1000) - 24 * 60 * 60;
+
+  try {
+    res.json(db.getPollLog(spId, since));
+  } catch (err) {
+    console.error('[api] GET /admin/poll-log', err.message);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

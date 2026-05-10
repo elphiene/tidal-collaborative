@@ -26,6 +26,10 @@ let _schedulerTimer    = null;
 let _currentIntervalMs = 30_000;
 let _backfillDone      = false;
 
+// Tracks must exist in DB for at least this long before Tidal-side removal detection
+// is applied, preventing false positives while propagation is still in-flight.
+const REMOVAL_GRACE_PERIOD_SEC = 120;
+
 // ---------------------------------------------------------------------------
 // Token management
 // ---------------------------------------------------------------------------
@@ -73,7 +77,7 @@ async function getAccessTokenForUser(user) {
  * Add a track to all OTHER users' Tidal playlists linked to this shared playlist.
  * Called after a new track is detected and added to the DB.
  */
-async function propagateAddToOtherUsers(sharedPlaylistId, excludeUserId, trackId) {
+async function propagateAddToOtherUsers(sharedPlaylistId, excludeUserId, trackId, trackTitle, trackArtist) {
   const links = db.getPlaylistLinks(sharedPlaylistId);
   for (const link of links) {
     if (link.user_id === excludeUserId) continue;
@@ -82,6 +86,7 @@ async function propagateAddToOtherUsers(sharedPlaylistId, excludeUserId, trackId
     try {
       const token = await getAccessTokenForUser(user);
       await tidalAddTrack(link.tidal_playlist_id, trackId, token);
+      db.logTrackEvent(sharedPlaylistId, trackId, 'added', null, 'propagation', link.user_id, trackTitle, trackArtist);
       console.log(`[poller] propagated +${trackId} → "${user.display_name || link.user_id}"`);
     } catch (err) {
       console.error(`[poller] propagate add failed for "${link.user_id}": ${err.message}`);
@@ -91,7 +96,8 @@ async function propagateAddToOtherUsers(sharedPlaylistId, excludeUserId, trackId
 
 /**
  * Remove a track from ALL users' Tidal playlists linked to this shared playlist.
- * Called when a track is deleted via the webapp.
+ * On success, clears the user's removal queue entry — the poller will retry
+ * any remaining entries on the next cycle for users whose tokens are expired.
  */
 async function propagateRemoveToAllUsers(sharedPlaylistId, trackId) {
   const links = db.getPlaylistLinks(sharedPlaylistId);
@@ -101,9 +107,12 @@ async function propagateRemoveToAllUsers(sharedPlaylistId, trackId) {
     try {
       const token = await getAccessTokenForUser(user);
       await tidalRemoveTrack(link.tidal_playlist_id, trackId, token);
+      db.markRemovalComplete(sharedPlaylistId, trackId, link.user_id);
+      db.logTrackEvent(sharedPlaylistId, trackId, 'removed', null, 'propagation', link.user_id, null, null);
       console.log(`[poller] propagated -${trackId} → "${user.display_name || link.user_id}"`);
     } catch (err) {
       console.error(`[poller] propagate remove failed for "${link.user_id}": ${err.message}`);
+      // Queue entry stays — poller will retry on next cycle
     }
   }
 }
@@ -118,14 +127,41 @@ async function pollPlaylist(link, accessToken, broadcastFn) {
   const userId           = link.user_id;
   const displayName      = link.tidal_playlist_name || tidalPlaylistId;
 
-  // Resume from persisted cursor (null = start from beginning)
+  const pollCounts = { newTracks: 0, removedTracks: 0, queuedRemovals: 0 };
+
   const { ids: tidalIds, truncated, nextCursor } =
     await tidalGetPlaylistTrackIds(tidalPlaylistId, accessToken, link.scan_cursor ?? null);
 
-  // Diff against all tracks ever seen (including soft-deleted) so that a
-  // webapp deletion is not resurrected before Tidal-side removal propagates.
-  const alreadySynced = db.getAllTrackIds(sharedPlaylistId);
-  const newTrackIds   = [...tidalIds].filter(id => !alreadySynced.has(id));
+  const activeIds       = db.getActiveTrackIds(sharedPlaylistId);
+  const pendingRemovals = db.getPendingRemovalsForUser(sharedPlaylistId, userId);
+
+  // --- 1. Process pending removals ---
+  // These are tracks deleted while this user's token was expired (or propagation failed).
+  for (const trackId of pendingRemovals) {
+    if (tidalIds.has(trackId)) {
+      try {
+        await tidalRemoveTrack(tidalPlaylistId, trackId, accessToken);
+        db.markRemovalComplete(sharedPlaylistId, trackId, userId);
+        db.logTrackEvent(sharedPlaylistId, trackId, 'removed', null, 'removal_queue', userId, null, null, 'processed from queue');
+        pollCounts.queuedRemovals++;
+        console.log(`[poller] removal queue: removed ${trackId} from "${displayName}"`);
+      } catch (err) {
+        // Leave queue entry in place — will retry next poll
+        console.error(`[poller] removal queue: could not remove ${trackId} from "${displayName}": ${err.message}`);
+      }
+    } else {
+      // Already gone from this user's Tidal — just confirm and clean up
+      db.markRemovalComplete(sharedPlaylistId, trackId, userId);
+      db.logTrackEvent(sharedPlaylistId, trackId, 'removed', null, 'removal_queue', userId, null, null, 'confirmed gone from Tidal');
+      pollCounts.queuedRemovals++;
+    }
+  }
+
+  // --- 2. Detect new tracks ---
+  // A track is "new" if: not currently active AND not pending removal for this user.
+  // Pending-removal tracks are excluded so a deleted track that's still in Tidal
+  // (pending the retry above) cannot sneak back in as a new addition.
+  const newTrackIds = [...tidalIds].filter(id => !activeIds.has(id) && !pendingRemovals.has(id));
 
   if (newTrackIds.length > 0) {
     console.log(`[poller] "${displayName}": ${newTrackIds.length} new track(s) detected`);
@@ -134,10 +170,14 @@ async function pollPlaylist(link, accessToken, broadcastFn) {
   for (const trackId of newTrackIds) {
     const { title, artist } = await tidalGetTrackInfo(trackId, accessToken);
     const maxPos = db.getMaxPosition(sharedPlaylistId);
-    // INSERT OR IGNORE — unique partial index makes this atomic; returns null if already active
-    const track = db.addTrack(sharedPlaylistId, trackId, userId, maxPos + 1, title, artist);
+    const track  = db.addTrack(sharedPlaylistId, trackId, userId, maxPos + 1, title, artist);
 
     if (track) {
+      // Clear any stale removal queue entries — track is being re-added intentionally
+      db.clearRemovalQueue(sharedPlaylistId, trackId);
+
+      db.logTrackEvent(sharedPlaylistId, trackId, 'added', userId, 'tidal_poll', null, title, artist);
+      pollCounts.newTracks++;
       broadcastFn(sharedPlaylistId, {
         type:               'track_added',
         shared_playlist_id: sharedPlaylistId,
@@ -148,16 +188,75 @@ async function pollPlaylist(link, accessToken, broadcastFn) {
         position:           track.position,
         timestamp:          Date.now(),
       });
-      await propagateAddToOtherUsers(sharedPlaylistId, userId, trackId);
+      await propagateAddToOtherUsers(sharedPlaylistId, userId, trackId, title, artist);
     }
   }
 
-  // Persist cursor or mark scan complete
+  // --- 3. Tidal-side removal detection (full scans only) ---
+  // If a track is active in DB but missing from this user's Tidal, and it was
+  // added long enough ago that propagation should have settled, treat it as an
+  // intentional removal by the user and propagate it to everyone else.
+  if (!truncated) {
+    const candidates = db.getTracksForRemovalDetection(sharedPlaylistId, link.id, REMOVAL_GRACE_PERIOD_SEC);
+    for (const track of candidates) {
+      const trackId = String(track.tidal_track_id);
+      if (!tidalIds.has(trackId)) {
+        console.log(`[poller] "${displayName}": Tidal-side removal detected for ${trackId}`);
+        await handleTidalRemoval(sharedPlaylistId, trackId, userId, broadcastFn, track);
+        pollCounts.removedTracks++;
+      }
+    }
+  }
+
+  // --- 4. Update pagination cursor and write poll log ---
   if (truncated && nextCursor) {
     db.setLinkCursor(link.id, nextCursor);
     console.log(`[poller] "${displayName}": paginated — cursor saved for next tick`);
+    db.writePollLog(sharedPlaylistId, userId, tidalPlaylistId, 'paginated', pollCounts);
   } else {
     db.clearLinkCursor(link.id);
+    db.writePollLog(sharedPlaylistId, userId, tidalPlaylistId, 'ok', pollCounts);
+  }
+}
+
+/**
+ * Handle a track that the user has removed from their Tidal playlist directly.
+ * Soft-deletes the track in DB, writes removal queue entries for all other linked
+ * users, broadcasts the removal, and attempts immediate propagation.
+ */
+async function handleTidalRemoval(sharedPlaylistId, trackId, detectedByUserId, broadcastFn, trackMeta) {
+  db.removeTrack(sharedPlaylistId, trackId);
+  // Queue entries for all OTHER users (current user's Tidal already confirmed empty)
+  db.addToRemovalQueueAllUsers(sharedPlaylistId, trackId, detectedByUserId, detectedByUserId);
+
+  db.logTrackEvent(
+    sharedPlaylistId, trackId, 'removed', detectedByUserId, 'tidal_removal_detected',
+    null, trackMeta.track_title, trackMeta.track_artist, 'detected missing from Tidal',
+  );
+
+  broadcastFn(sharedPlaylistId, {
+    type:               'track_removed',
+    shared_playlist_id: sharedPlaylistId,
+    tidal_track_id:     trackId,
+    removed_by:         detectedByUserId,
+    timestamp:          Date.now(),
+  });
+
+  // Propagate immediately (best-effort; queue handles any failures)
+  const links = db.getPlaylistLinks(sharedPlaylistId);
+  for (const link of links) {
+    if (link.user_id === detectedByUserId) continue;
+    const user = db.getUser(link.user_id);
+    if (!user || user.sync_status === 'token_revoked') continue;
+    try {
+      const token = await getAccessTokenForUser(user);
+      await tidalRemoveTrack(link.tidal_playlist_id, trackId, token);
+      db.markRemovalComplete(sharedPlaylistId, trackId, link.user_id);
+      db.logTrackEvent(sharedPlaylistId, trackId, 'removed', null, 'propagation', link.user_id, trackMeta.track_title, trackMeta.track_artist);
+      console.log(`[poller] tidal-removal propagated -${trackId} → "${user.display_name || link.user_id}"`);
+    } catch (err) {
+      console.error(`[poller] tidal-removal propagation failed for "${link.user_id}": ${err.message}`);
+    }
   }
 }
 
@@ -216,6 +315,7 @@ async function pollUser(userId, broadcastFn) {
       }
       console.error(`[poller] poll failed for "${name}" / "${link.tidal_playlist_name || link.tidal_playlist_id}": ${err.message}`);
       db.setUserSyncStatus(userId, 'error', err.message);
+      db.writePollLog(link.shared_playlist_id, userId, link.tidal_playlist_id, 'error', {}, err.message.slice(0, 200));
       hadError = true;
     }
   }
@@ -294,6 +394,15 @@ function startPoller(broadcastFn) {
 
   setTimeout(() => schedulePollCycle(broadcastFn), 5_000);
   _schedulerTimer = setInterval(run, _currentIntervalMs);
+
+  // Prune activity log entries older than 7 days, run every 6 hours
+  const pruneEvents = () => {
+    const cutoff = Math.floor(Date.now() / 1000) - 7 * 24 * 60 * 60;
+    const result = db.pruneTrackEvents(cutoff);
+    if (result.changes > 0) console.log(`[poller] pruned ${result.changes} old track event(s)`);
+  };
+  setTimeout(pruneEvents, 60_000); // first run after 1 minute
+  setInterval(pruneEvents, 6 * 60 * 60 * 1000);
 }
 
 /** Trigger an immediate poll for a specific user or all users. */
@@ -335,11 +444,15 @@ async function initNewLink(link) {
   if (existingTracks.length > 0) {
     console.log(`[poller] initNewLink: pushing ${existingTracks.length} track(s) → "${displayName}"`);
     const { ids: currentTidalIds } = await tidalGetPlaylistTrackIds(tidalPlaylistId, accessToken);
+    // Don't push tracks that are pending removal for this user
+    const pendingRemovals = db.getPendingRemovalsForUser(link.shared_playlist_id, userId);
     for (const track of existingTracks) {
       const id = String(track.tidal_track_id);
+      if (pendingRemovals.has(id)) continue;
       if (!currentTidalIds.has(id)) {
         try {
           await tidalAddTrack(tidalPlaylistId, id, accessToken);
+          db.logTrackEvent(link.shared_playlist_id, id, 'added', null, 'init_link', userId, track.track_title, track.track_artist);
         } catch (err) {
           console.warn(`[poller] initNewLink: could not add ${id}: ${err.message}`);
         }
@@ -385,6 +498,8 @@ async function syncPlaylistForLink(link, accessToken) {
       const maxPos = db.getMaxPosition(sharedPlaylistId);
       const track  = db.addTrack(sharedPlaylistId, id, userId, maxPos + 1, title, artist);
       if (track) {
+        db.clearRemovalQueue(sharedPlaylistId, id);
+        db.logTrackEvent(sharedPlaylistId, id, 'added', userId, 'force_sync', null, title, artist);
         if (_broadcastFn) {
           _broadcastFn(sharedPlaylistId, {
             type: 'track_added', shared_playlist_id: sharedPlaylistId,
@@ -392,7 +507,7 @@ async function syncPlaylistForLink(link, accessToken) {
             added_by: userId, position: track.position, timestamp: Date.now(),
           });
         }
-        await propagateAddToOtherUsers(sharedPlaylistId, userId, id);
+        await propagateAddToOtherUsers(sharedPlaylistId, userId, id, title, artist);
         serverIds.add(id);
         merged++;
       }
