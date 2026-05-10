@@ -1565,4 +1565,92 @@ body.nav-open .hamburger-btn .hamburger-bar:nth-child(3) { transform: translateY
   /* Tracks table: hide Added At on mobile (column 4) so delete btn stays */
   .tracks-table th:nth-child(4),
   .tracks-table td:nth-child(4) { display: none; }
+
+  /* Activity log: hide Source column on mobile */
+  .activity-table th:nth-child(5),
+  .activity-table td:nth-child(5) { display: none; }
 }
+
+/* ---- Activity log ---- */
+
+.activity-log-wrap {
+  overflow-x: auto;
+  max-height: 480px;
+  overflow-y: auto;
+}
+
+.activity-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.82rem;
+}
+
+.activity-table th {
+  padding: 0.6rem 0.9rem;
+  text-align: left;
+  font-size: 0.68rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border);
+  background: rgba(0,0,0,0.2);
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+.activity-table td {
+  padding: 0.6rem 0.9rem;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+
+.activity-table tr:last-child td { border-bottom: none; }
+.activity-table tr:hover td { background: rgba(255,255,255,0.03); }
+
+.event-time  { white-space: nowrap; }
+.event-track { max-width: 220px; }
+
+.event-badge {
+  display: inline-block;
+  padding: 0.2rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.event-badge-add {
+  background: rgba(78, 237, 255, 0.12);
+  color: var(--accent);
+}
+
+.event-badge-remove {
+  background: rgba(220, 53, 69, 0.12);
+  color: #e06c75;
+}
+
+.event-target {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.activity-section-title {
+  font-size: 0.78rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--text-muted);
+  margin: 0 0 0.6rem 0;
+}
+
+.poll-status {
+  font-size: 0.72rem;
+  font-weight: 600;
+  padding: 0.15rem 0.45rem;
+  border-radius: 4px;
+}
+.poll-ok   { color: var(--accent);       background: rgba(78,237,255,0.10); }
+.poll-warn { color: #ffa500;             background: rgba(255,165,0,0.10); }
+.poll-error{ color: #e06c75;             background: rgba(220,53,69,0.10); }
