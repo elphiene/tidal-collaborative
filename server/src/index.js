@@ -6,8 +6,9 @@ const path    = require('path');
 const session = require('express-session');
 const crypto  = require('crypto');
 
-const db     = require('./db');
-const config = require('./config');
+const db      = require('./db');
+const config  = require('./config');
+const metrics = require('./metrics');
 
 // ---------------------------------------------------------------------------
 // Startup — DB must init first so we can load/generate secrets
@@ -62,6 +63,12 @@ app.use(express.json());
 
 // REST API (must come before static files so /api routes are not shadowed)
 app.use('/api', api);
+
+// Prometheus metrics — unauthenticated, local port only
+app.get('/metrics', async (_req, res) => {
+  res.set('Content-Type', metrics.register.contentType);
+  res.end(await metrics.register.metrics());
+});
 
 // Serve web UI as static files
 const webUiDir = path.join(__dirname, '../../web-ui');

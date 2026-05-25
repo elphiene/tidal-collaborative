@@ -251,17 +251,46 @@ async function tidalGetPlaylistTrackIds(playlistId, accessToken, startCursor = n
 async function tidalAddTrack(playlistId, trackId, accessToken) {
   await tidalFetch(`/playlists/${playlistId}/relationships/items`, accessToken, {
     method: 'POST',
-    body:   JSON.stringify({ data: [{ id: String(trackId), type: 'tracks' }] }),
+    body:   JSON.stringify({ data: [{ id: String(trackId), type: 'tracks', meta: {} }] }),
   });
 }
 
 /**
+ * Fetch a Map of trackId → itemId for all items in a playlist.
+ * The Tidal DELETE endpoint requires meta.itemId (the playlist item ID).
+ */
+async function tidalGetPlaylistItemMap(playlistId, accessToken) {
+  const map  = new Map();
+  let   path = `/playlists/${playlistId}/relationships/items?limit=100`;
+
+  while (true) {
+    const data  = await tidalFetch(path, accessToken, { method: 'GET' });
+    const items = data?.data ?? [];
+    for (const item of items) {
+      if (item.id) map.set(String(item.id), item.meta?.itemId ?? item.id);
+    }
+    const nextCursorToken = data?.links?.meta?.nextCursor ?? null;
+    if (!nextCursorToken || items.length === 0) break;
+    path = `/playlists/${playlistId}/relationships/items?limit=100&page%5Bcursor%5D=${encodeURIComponent(nextCursorToken)}`;
+    await new Promise((r) => setTimeout(r, 150));
+  }
+  return map;
+}
+
+/**
  * Remove a track from a playlist.
+ * Fetches the playlist item map to resolve the required meta.itemId.
  */
 async function tidalRemoveTrack(playlistId, trackId, accessToken) {
+  const itemMap = await tidalGetPlaylistItemMap(playlistId, accessToken);
+  const itemId  = itemMap.get(String(trackId));
+  if (!itemId) {
+    // Track not in playlist — nothing to remove
+    return;
+  }
   await tidalFetch(`/playlists/${playlistId}/relationships/items`, accessToken, {
     method: 'DELETE',
-    body:   JSON.stringify({ data: [{ id: String(trackId), type: 'tracks' }] }),
+    body:   JSON.stringify({ data: [{ id: String(trackId), type: 'tracks', meta: { itemId } }] }),
   });
 }
 
