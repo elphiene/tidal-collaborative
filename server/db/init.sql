@@ -92,3 +92,39 @@ CREATE INDEX IF NOT EXISTS idx_invites_code     ON playlist_invites(code);
 -- NOTE: The partial unique index on tracks is created in db.js migrations
 -- (after deduplication of any existing data) rather than here.
 -- idx_tracks_active_unique ON tracks(shared_playlist_id, tidal_track_id) WHERE removed_at IS NULL
+
+-- Append-only global event log — never updated or deleted
+CREATE TABLE IF NOT EXISTS master_journal (
+  id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+  action             TEXT    NOT NULL,           -- 'added' | 'removed'
+  user_id            TEXT    NOT NULL,
+  tidal_track_id     TEXT    NOT NULL,
+  track_title        TEXT,
+  track_artist       TEXT,
+  shared_playlist_id INTEGER NOT NULL REFERENCES shared_playlists(id) ON DELETE CASCADE,
+  created_at         INTEGER NOT NULL DEFAULT (unixepoch())
+);
+CREATE INDEX IF NOT EXISTS idx_journal_playlist ON master_journal(shared_playlist_id, id);
+CREATE INDEX IF NOT EXISTS idx_journal_user     ON master_journal(user_id, id);
+CREATE INDEX IF NOT EXISTS idx_journal_created  ON master_journal(created_at);
+
+-- Per-user current track state + pending Tidal apply queue
+-- One row per (user_id, shared_playlist_id, tidal_track_id)
+CREATE TABLE IF NOT EXISTS user_actions (
+  id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id            TEXT    NOT NULL,
+  shared_playlist_id INTEGER NOT NULL REFERENCES shared_playlists(id) ON DELETE CASCADE,
+  tidal_track_id     TEXT    NOT NULL,
+  track_title        TEXT,
+  track_artist       TEXT,
+  current_action     TEXT    NOT NULL DEFAULT 'added',  -- 'added' | 'removed'
+  journal_id         INTEGER REFERENCES master_journal(id),  -- NULL = not yet flushed
+  tidal_applied      INTEGER NOT NULL DEFAULT 0,             -- 1 = Tidal is in sync
+  tidal_origin       INTEGER NOT NULL DEFAULT 0,             -- 1 = came from Tidal poll
+  created_at         INTEGER NOT NULL DEFAULT (unixepoch()),
+  updated_at         INTEGER NOT NULL DEFAULT (unixepoch()),
+  UNIQUE(user_id, shared_playlist_id, tidal_track_id)
+);
+CREATE INDEX IF NOT EXISTS idx_uactions_user    ON user_actions(user_id, shared_playlist_id);
+CREATE INDEX IF NOT EXISTS idx_uactions_unflushed ON user_actions(user_id, shared_playlist_id) WHERE journal_id IS NULL;
+CREATE INDEX IF NOT EXISTS idx_uactions_pending ON user_actions(user_id, tidal_applied) WHERE tidal_applied = 0;

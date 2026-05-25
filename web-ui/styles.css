@@ -1565,4 +1565,74 @@ body.nav-open .hamburger-btn .hamburger-bar:nth-child(3) { transform: translateY
   /* Tracks table: hide Added At on mobile (column 4) so delete btn stays */
   .tracks-table th:nth-child(4),
   .tracks-table td:nth-child(4) { display: none; }
+
+  /* Journal: stack filters on mobile */
+  .journal-filters { flex-wrap: wrap; }
+  .journal-entry { flex-wrap: wrap; gap: 0.2rem; }
+  .journal-time { width: 100%; }
+}
+
+/* ---------------------------------------------------------------------------
+   Journal
+--------------------------------------------------------------------------- */
+
+.stat-card-clickable {
+  cursor: pointer;
+  user-select: none;
+}
+.stat-card-clickable:hover { border-color: var(--accent); }
+
+.journal-filters {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.form-select {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  padding: 0.35rem 0.6rem;
+  font-size: 0.85rem;
+  cursor: pointer;
+  outline: none;
+  transition: border-color 0.15s;
+}
+.form-select:focus { border-color: var(--accent); }
+.form-select-sm { padding: 0.25rem 0.5rem; font-size: 0.8rem; }
+
+.journal-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.journal-entry {
+  display: flex;
+  align-items: baseline;
+  gap: 0.35rem;
+  padding: 0.55rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.875rem;
+  line-height: 1.4;
+  transition: background 0.1s;
+}
+.journal-entry:last-child { border-bottom: none; }
+.journal-entry:hover { background: var(--surface-2); }
+
+.journal-who    { font-weight: 600; white-space: nowrap; }
+.journal-verb   { font-weight: 600; white-space: nowrap; }
+.journal-track  { color: var(--text); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.journal-prep   { color: var(--text-muted); white-space: nowrap; }
+.journal-playlist { color: var(--text-muted); white-space: nowrap; }
+.journal-time   { margin-left: auto; color: var(--text-muted); font-size: 0.78rem; white-space: nowrap; flex-shrink: 0; }
+
+.journal-action-added   { color: var(--accent); }
+.journal-action-removed { color: var(--danger-hover); }
+
+.journal-load-more {
+  display: flex;
+  justify-content: center;
+  padding: 0.75rem 0 0.25rem;
 }

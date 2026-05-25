@@ -418,14 +418,13 @@ function setPollInterval(ms) {
 
 function upsertUser(userId, displayName, accessTokenEnc, refreshTokenEnc, tokenExpiresAt) {
   return db.prepare(`
-    INSERT INTO users (user_id, display_name, access_token_enc, refresh_token_enc, token_expires_at, token_dead, sync_status)
-    VALUES (?, ?, ?, ?, ?, 0, 'ok')
+    INSERT INTO users (user_id, display_name, access_token_enc, refresh_token_enc, token_expires_at, sync_status)
+    VALUES (?, ?, ?, ?, ?, 'ok')
     ON CONFLICT(user_id) DO UPDATE SET
       display_name      = excluded.display_name,
       access_token_enc  = excluded.access_token_enc,
       refresh_token_enc = excluded.refresh_token_enc,
       token_expires_at  = excluded.token_expires_at,
-      token_dead        = 0,
       sync_status       = 'ok',
       sync_error_msg    = NULL,
       sync_retry_after  = NULL
@@ -449,14 +448,14 @@ function getUserSyncStatuses() {
 
 function markUserTokenDead(userId) {
   return db.prepare(`
-    UPDATE users SET token_dead = 1, sync_status = 'token_revoked', sync_error_msg = 'Token revoked or expired'
+    UPDATE users SET sync_status = 'token_revoked', sync_error_msg = 'Token revoked or expired'
     WHERE user_id = ?
   `).run(userId);
 }
 
 function resetUserSyncStatus(userId) {
   return db.prepare(`
-    UPDATE users SET sync_status = 'ok', sync_error_msg = NULL, sync_retry_after = NULL, token_dead = 0
+    UPDATE users SET sync_status = 'ok', sync_error_msg = NULL, sync_retry_after = NULL
     WHERE user_id = ?
   `).run(userId);
 }
@@ -530,6 +529,184 @@ function getAllUsersWithPresence() {
 }
 
 // ---------------------------------------------------------------------------
+// master_journal
+// ---------------------------------------------------------------------------
+
+function addJournalEntry(action, userId, tidalTrackId, trackTitle, trackArtist, sharedPlaylistId) {
+  const info = db.prepare(`
+    INSERT INTO master_journal (action, user_id, tidal_track_id, track_title, track_artist, shared_playlist_id)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(action, userId, String(tidalTrackId), trackTitle ?? null, trackArtist ?? null, sharedPlaylistId);
+  return db.prepare('SELECT * FROM master_journal WHERE id = ?').get(info.lastInsertRowid);
+}
+
+/**
+ * Fetch journal entries for a shared playlist with id > afterId, oldest-first.
+ * Used by the poller to pull new events for other users.
+ */
+function getJournalEntriesAfter(sharedPlaylistId, afterId) {
+  return db.prepare(`
+    SELECT mj.*, COALESCE(u.display_name, mj.user_id) AS display_name,
+           sp.name AS playlist_name
+    FROM master_journal mj
+    LEFT JOIN users u ON u.user_id = mj.user_id
+    LEFT JOIN shared_playlists sp ON sp.id = mj.shared_playlist_id
+    WHERE mj.shared_playlist_id = ? AND mj.id > ?
+    ORDER BY mj.id ASC
+  `).all(sharedPlaylistId, afterId ?? 0);
+}
+
+/**
+ * Paginated journal query for the admin UI.
+ * Returns entries newest-first with display_name and playlist_name joined.
+ */
+function getJournalPage({ sharedPlaylistId = null, action = null, limit = 50, offset = 0 } = {}) {
+  const where = [];
+  const args  = [];
+  if (sharedPlaylistId) { where.push('mj.shared_playlist_id = ?'); args.push(sharedPlaylistId); }
+  if (action)           { where.push('mj.action = ?');             args.push(action); }
+  const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : '';
+  args.push(Math.min(limit, 200), offset);
+  return db.prepare(`
+    SELECT mj.*,
+           COALESCE(u.display_name, mj.user_id) AS display_name,
+           sp.name AS playlist_name
+    FROM master_journal mj
+    LEFT JOIN users u ON u.user_id = mj.user_id
+    LEFT JOIN shared_playlists sp ON sp.id = mj.shared_playlist_id
+    ${whereClause}
+    ORDER BY mj.id DESC
+    LIMIT ? OFFSET ?
+  `).all(...args);
+}
+
+function getJournalStats() {
+  const now = Math.floor(Date.now() / 1000);
+  return db.prepare(`
+    SELECT
+      COUNT(*)                                               AS total,
+      COUNT(CASE WHEN created_at > ? THEN 1 END)            AS last_7d,
+      COUNT(CASE WHEN created_at > ? THEN 1 END)            AS last_24h
+    FROM master_journal
+  `).get(now - 7 * 86400, now - 86400);
+}
+
+// ---------------------------------------------------------------------------
+// user_actions
+// ---------------------------------------------------------------------------
+
+/**
+ * Upsert a track's current state for a user.
+ * Only updates if the state actually changes (prevents spurious Tidal calls).
+ */
+function upsertUserAction(userId, sharedPlaylistId, tidalTrackId, action, trackTitle, trackArtist,
+  { tidalOrigin = 0, tidalApplied = 0, journalId = null } = {}) {
+  return db.prepare(`
+    INSERT INTO user_actions
+      (user_id, shared_playlist_id, tidal_track_id, track_title, track_artist,
+       current_action, journal_id, tidal_applied, tidal_origin)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(user_id, shared_playlist_id, tidal_track_id) DO UPDATE SET
+      current_action = excluded.current_action,
+      track_title    = COALESCE(excluded.track_title, track_title),
+      track_artist   = COALESCE(excluded.track_artist, track_artist),
+      journal_id     = CASE
+        WHEN current_action != excluded.current_action THEN NULL
+        WHEN excluded.journal_id IS NOT NULL
+         AND (journal_id IS NULL OR excluded.journal_id > journal_id)
+        THEN excluded.journal_id
+        ELSE journal_id
+      END,
+      tidal_applied  = CASE
+        WHEN current_action != excluded.current_action THEN 0
+        WHEN excluded.tidal_applied = 1               THEN 1
+        ELSE tidal_applied
+      END,
+      updated_at     = unixepoch()
+    WHERE current_action != excluded.current_action
+       OR (excluded.tidal_applied = 1 AND tidal_applied = 0)
+       OR (excluded.journal_id IS NOT NULL
+           AND (journal_id IS NULL OR excluded.journal_id > journal_id))
+  `).run(
+    userId, sharedPlaylistId, String(tidalTrackId),
+    trackTitle ?? null, trackArtist ?? null,
+    action, journalId, tidalApplied ? 1 : 0, tidalOrigin ? 1 : 0,
+  );
+}
+
+/**
+ * Track IDs the server believes are currently 'added' in a user's Tidal playlist.
+ */
+/**
+ * Returns track IDs confirmed present in the user's Tidal playlist (tidal_applied=1).
+ * Excludes pending adds (tidal_applied=0) — those haven't been pushed to Tidal yet,
+ * so stepDetect must not treat their absence as a removal.
+ */
+function getUserActiveTrackIds(userId, sharedPlaylistId) {
+  const rows = db.prepare(`
+    SELECT tidal_track_id FROM user_actions
+    WHERE user_id = ? AND shared_playlist_id = ? AND current_action = 'added' AND tidal_applied = 1
+  `).all(userId, sharedPlaylistId);
+  return new Set(rows.map(r => String(r.tidal_track_id)));
+}
+
+/**
+ * All track IDs the server has any record of for this user+playlist (regardless of state).
+ * Used to avoid re-detecting removed tracks as new.
+ */
+function getUserAllKnownTrackIds(userId, sharedPlaylistId) {
+  const rows = db.prepare(`
+    SELECT tidal_track_id FROM user_actions
+    WHERE user_id = ? AND shared_playlist_id = ?
+  `).all(userId, sharedPlaylistId);
+  return new Set(rows.map(r => String(r.tidal_track_id)));
+}
+
+/**
+ * user_action rows not yet flushed to master_journal (journal_id IS NULL).
+ */
+function getUnflushedUserActions(userId, sharedPlaylistId) {
+  return db.prepare(`
+    SELECT * FROM user_actions
+    WHERE user_id = ? AND shared_playlist_id = ? AND journal_id IS NULL
+    ORDER BY id ASC
+  `).all(userId, sharedPlaylistId);
+}
+
+/**
+ * Stamp a user_action row with its master_journal entry id.
+ */
+function setUserActionJournalId(id, journalId) {
+  return db.prepare('UPDATE user_actions SET journal_id = ? WHERE id = ?').run(journalId, id);
+}
+
+/**
+ * Highest journal_id a user has seen for a playlist (used to detect new entries to pull).
+ */
+function getUserMaxJournalId(userId, sharedPlaylistId) {
+  const row = db.prepare(`
+    SELECT MAX(journal_id) AS max_jid FROM user_actions
+    WHERE user_id = ? AND shared_playlist_id = ?
+  `).get(userId, sharedPlaylistId);
+  return row?.max_jid ?? 0;
+}
+
+/**
+ * user_action rows pending Tidal application (tidal_applied = 0), oldest-first.
+ */
+function getPendingTidalActions(userId, sharedPlaylistId) {
+  return db.prepare(`
+    SELECT * FROM user_actions
+    WHERE user_id = ? AND shared_playlist_id = ? AND tidal_applied = 0
+    ORDER BY id ASC
+  `).all(userId, sharedPlaylistId);
+}
+
+function markTidalApplied(id) {
+  return db.prepare('UPDATE user_actions SET tidal_applied = 1 WHERE id = ?').run(id);
+}
+
+// ---------------------------------------------------------------------------
 // Exports
 // ---------------------------------------------------------------------------
 
@@ -585,4 +762,18 @@ module.exports = {
   getInvitesByPlaylist,
   getInviteByCode,
   revokeInvite,
+  // master_journal
+  addJournalEntry,
+  getJournalEntriesAfter,
+  getJournalPage,
+  getJournalStats,
+  // user_actions
+  upsertUserAction,
+  getUserActiveTrackIds,
+  getUserAllKnownTrackIds,
+  getUnflushedUserActions,
+  setUserActionJournalId,
+  getUserMaxJournalId,
+  getPendingTidalActions,
+  markTidalApplied,
 };
