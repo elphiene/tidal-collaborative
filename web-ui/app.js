@@ -1591,7 +1591,7 @@ function renderJournal() {
     const when        = timeAgo(e.created_at);
     return `
       <div class="journal-entry">
-        <span class="journal-sentence"><span class="journal-who">${who}</span> <span class="journal-verb ${actionClass}">${verb}</span> ${escHtml(track)} ${prep} ${playlist}</span>
+        <span class="journal-sentence"><span class="journal-who">${who}</span> <span class="journal-verb ${actionClass}">${verb}</span> <span class="journal-track">${escHtml(track)}</span> ${prep} <span class="journal-playlist">${playlist}</span></span>
         <span class="journal-time">${when}</span>
       </div>`;
   }).join('');

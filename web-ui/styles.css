@@ -1621,10 +1621,36 @@ body.nav-open .hamburger-btn .hamburger-bar:nth-child(3) { transform: translateY
 .journal-entry:last-child { border-bottom: none; }
 .journal-entry:hover { background: var(--surface-2); }
 
-.journal-sentence { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.journal-who    { font-weight: 600; }
+.journal-sentence { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 1.8; }
 .journal-verb   { font-weight: 600; }
 .journal-time   { margin-left: 1rem; color: var(--text-muted); font-size: 0.78rem; white-space: nowrap; flex-shrink: 0; }
+
+.journal-who,
+.journal-track,
+.journal-playlist {
+  display: inline;
+  padding: 0.1em 0.45em;
+  border-radius: 4px;
+  font-size: 0.82em;
+  vertical-align: baseline;
+}
+.journal-who {
+  background: var(--accent-dim);
+  color: var(--accent);
+  border: 1px solid rgba(78, 237, 255, 0.25);
+  font-weight: 600;
+}
+.journal-track {
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--text-primary);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  font-weight: 500;
+}
+.journal-playlist {
+  background: rgba(78, 237, 255, 0.05);
+  color: var(--text-secondary);
+  border: 1px solid rgba(78, 237, 255, 0.12);
+}
 
 .journal-action-added   { color: var(--accent); }
 .journal-action-removed { color: var(--danger-hover); }
