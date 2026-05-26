@@ -1,6 +1,6 @@
 # Tidal Collaborative
 
-Self-hosted real-time collaborative playlist sync for [Tidal](https://tidal.com). Sign in with your Tidal account in any browser, link a playlist, and every change — adds, removes — propagates to all collaborators automatically.
+Self-hosted real-time collaborative playlist sync for [Tidal](https://tidal.com). Sign in with your Tidal account in any browser, link a playlist, and every change — adds and removes — propagates to all collaborators automatically.
 
 ---
 
@@ -13,20 +13,32 @@ Any browser (phone, desktop, tablet)
         └── Link your Tidal playlist to a shared playlist
 
 Server (Docker / home lab)
-  ├── Polls each linked Tidal playlist every 60 seconds
-  ├── Detects added / removed tracks via set-difference
-  ├── Writes changes to SQLite
-  ├── Propagates changes to all other linked playlists via Tidal API
+  ├── Polls each linked Tidal playlist every 30 seconds
+  ├── Detects added / removed tracks via per-user journal
+  ├── Writes changes to SQLite and propagates to all collaborators
   └── Pushes real-time notifications over WebSocket
 ```
 
 ### Sync flow
 
-1. User adds a track to their Tidal playlist
-2. Server detects the change on the next poll (≤ 60 s)
-3. Track is written to the shared playlist in SQLite
-4. Server calls the Tidal API to add the track to every other linked user's playlist
+1. User adds or removes a track in their Tidal app
+2. Server detects the change on the next poll (≤ 30 s)
+3. Change is written to the shared journal in SQLite
+4. Server pushes the change to every other collaborator's Tidal playlist
 5. All open browser tabs receive a WebSocket notification instantly
+
+---
+
+## Features
+
+- **Real-time sync** — adds and removes propagate to all collaborators within one poll cycle
+- **Activity log** — full audit trail of every change with who, what, and when
+- **Invite system** — invite-code links for private shared playlists
+- **Admin panel** — manage playlists, users, sync settings, and force-sync individual links
+- **Track deletion** — remove a track from the shared playlist and all linked Tidal playlists at once
+- **Sync status** — per-user health indicator; surfaces rate limits and expired sessions
+- **Prometheus metrics** — `/metrics` endpoint for Grafana or any compatible scraper
+- **Browser-guided setup** — first-run wizard generates secrets and walks through Tidal app registration
 
 ---
 
@@ -60,7 +72,7 @@ You need a free Tidal developer application to enable sign-in. The setup wizard 
 
 ```bash
 # 1. Download the compose file
-curl -O https://raw.githubusercontent.com/elphiene/tidal-collaborative/main/docker/docker-compose.yml
+curl -O https://raw.githubusercontent.com/elphiene/tidal-collaborative/master/docker/docker-compose.yml
 
 # 2. Start the container (no secrets needed — generated automatically)
 docker compose up -d
@@ -97,6 +109,7 @@ be guided through connecting your Tidal developer app and setting an admin PIN.
 cd server
 npm install
 npm start              # http://localhost:3000
+npm run dev            # auto-restart on file change
 ```
 
 Secrets are auto-generated on first run and stored in the SQLite database. You can optionally set them via environment variables in `server/.env` for deterministic local development.
@@ -113,8 +126,9 @@ tidal-collaborative/
 │   │   ├── config.js          ← Environment variables
 │   │   ├── crypto.js          ← AES-256-GCM token encryption
 │   │   ├── tidal.js           ← Tidal v2 API client
-│   │   ├── poller.js          ← 60-second polling loop + propagation
+│   │   ├── poller.js          ← Polling loop + journal sync engine
 │   │   ├── db.js              ← SQLite wrapper (better-sqlite3)
+│   │   ├── metrics.js         ← Prometheus metrics
 │   │   └── routes/
 │   │       ├── api.js         ← REST endpoints
 │   │       └── ws.js          ← WebSocket handler
@@ -126,7 +140,7 @@ tidal-collaborative/
 │   ├── styles.css
 │   └── app.js
 ├── docker/
-│   ├── Dockerfile             ← Multi-stage, node:20-alpine
+│   ├── Dockerfile             ← node:20-alpine
 │   ├── docker-compose.yml     ← Pulls image from Docker Hub
 │   ├── docker-compose.build.yml ← Override to build locally
 │   ├── build.sh               ← Build + tag + push image
@@ -147,24 +161,41 @@ tidal-collaborative/
 | `GET` | `/api/setup/status` | — | Setup completion status |
 | `POST` | `/api/setup/tidal-client-id` | — | Save Tidal Client ID |
 | `GET` | `/api/setup/redirect-uri` | — | Compute OAuth redirect URI |
-| `GET` | `/api/auth/start` | — | Begin OAuth flow → returns `authUrl` |
+| `GET` | `/api/auth/start` | — | Begin OAuth flow |
 | `GET` | `/api/auth/callback` | — | OAuth redirect handler |
 | `POST` | `/api/auth/logout` | session | Sign out |
 | `GET` | `/api/me` | session | Current user info |
 | `GET` | `/api/tidal/playlists` | session | User's Tidal playlists |
-| `GET` | `/api/admin/status` | — | PIN status |
-| `POST` | `/api/admin/setup` | — | Set admin PIN (first use only) |
-| `POST` | `/api/admin/auth` | — | Verify admin PIN |
+| `GET` | `/api/sync/status` | session | Per-user sync health |
 | `GET` | `/api/shared-playlists` | — | List shared playlists |
-| `POST` | `/api/shared-playlists` | — | Create shared playlist |
-| `DELETE` | `/api/shared-playlists/:id` | — | Delete shared playlist |
+| `GET` | `/api/shared-playlists/discover` | session | Discoverable public playlists |
+| `POST` | `/api/shared-playlists` | admin | Create shared playlist |
+| `PATCH` | `/api/shared-playlists/:id` | admin | Update shared playlist |
+| `DELETE` | `/api/shared-playlists/:id` | admin | Delete shared playlist |
 | `GET` | `/api/shared-playlists/:id/tracks` | — | List active tracks |
+| `DELETE` | `/api/shared-playlists/:id/tracks/:trackId` | session | Remove track from all playlists |
+| `POST` | `/api/shared-playlists/:id/tracks/reorder` | session | Reorder tracks |
 | `GET` | `/api/shared-playlists/:id/linked-users` | — | Users linked to playlist |
+| `POST` | `/api/shared-playlists/:id/invites` | admin | Create invite code |
+| `GET` | `/api/shared-playlists/:id/invites` | admin | List invite codes |
+| `DELETE` | `/api/invites/:id` | admin | Revoke invite |
+| `GET` | `/api/invites/:code` | — | Look up invite |
 | `GET` | `/api/links` | session | Current user's links |
 | `POST` | `/api/links` | session | Link a Tidal playlist |
 | `DELETE` | `/api/links/:id` | session | Unlink |
+| `POST` | `/api/links/:id/sync` | session | Force full bidirectional sync |
 | `GET` | `/api/users` | — | Active users (presence) |
+| `GET` | `/api/journal` | session | Activity log (paginated) |
+| `GET` | `/api/journal/stats` | session | Journal entry counts |
+| `GET` | `/api/admin/status` | — | Admin PIN status |
+| `POST` | `/api/admin/setup` | — | Set admin PIN (first use only) |
+| `POST` | `/api/admin/auth` | — | Verify admin PIN |
+| `GET` | `/api/admin/settings` | admin | Get server settings |
+| `PATCH` | `/api/admin/settings` | admin | Update server settings |
+| `POST` | `/api/admin/force-poll` | admin | Trigger immediate poll |
+| `POST` | `/api/admin/users/:id/reset-sync` | admin | Clear sync error for a user |
 | `WS` | `/ws` | session cookie | Real-time sync channel |
+| `GET` | `/metrics` | — | Prometheus metrics |
 
 ---
 
@@ -185,9 +216,9 @@ Secrets are auto-generated on first run and stored in the database. Setting env 
 ## Security model
 
 - **OAuth PKCE** — authentication handled entirely server-side; no token ever touches the browser
-- **AES-256-GCM encryption** — Tidal access and refresh tokens are encrypted at rest using `ENCRYPTION_KEY`; a stolen database file is not enough to access Tidal accounts
-- **Session cookies** — `httpOnly`, 30-day expiry; WebSocket connections authenticated via the same session
-- **Admin PIN** — 4-digit PIN gates the admin panel; stored in the database and set on first access
+- **AES-256-GCM encryption** — Tidal access and refresh tokens are encrypted at rest; a stolen `db.sqlite` is not enough to access Tidal accounts
+- **Session cookies** — `httpOnly`, 30-day expiry; WebSocket connections authenticated via the same session cookie
+- **Admin PIN** — gates the admin panel; set on first access and stored in the database
 
 ---
 
@@ -212,12 +243,4 @@ cp docker/data/db.sqlite backups/tidal-$(date +%Y%m%d).sqlite
 | Tidal API | Official `openapi.tidal.com/v2` (JSON:API) |
 | Container | Docker on `node:20-alpine` |
 | Web UI | Vanilla HTML / CSS / JS |
-
----
-
-## Roadmap
-
-- [ ] Track reorder sync
-- [ ] Granular permissions (view-only collaborators)
-- [ ] Configurable poll interval per playlist
-- [ ] Pagination for very large playlists (> 500 tracks)
+| Metrics | `prom-client` (Prometheus) |
