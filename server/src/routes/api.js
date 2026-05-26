@@ -11,6 +11,7 @@ const {
   getAccessTokenForUser,
   syncPlaylistForLink,
   propagateRemoveToAllUsers,
+  journalizeRemoval,
 } = require('../poller');
 
 const router = Router();
@@ -358,8 +359,8 @@ router.delete('/shared-playlists/:id/tracks/:trackId', async (req, res) => {
       timestamp:          Date.now(),
     });
 
-    // Propagate removal to all linked Tidal playlists (fire-and-forget, non-blocking)
-    propagateRemoveToAllUsers(spId, trackId)
+    // Propagate removal to all linked Tidal playlists and journal it (fire-and-forget)
+    propagateRemoveToAllUsers(spId, trackId, removedBy)
       .catch(err => console.error('[api] propagate remove failed:', err.message));
 
     res.json({ ok: true });
@@ -656,6 +657,51 @@ router.get('/users/all', (req, res) => {
     res.json(db.getAllUsersWithPresence());
   } catch (err) {
     console.error('[api] GET /users/all', err.message);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Admin — dedup Tidal playlists
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Journal — admin only
+// ---------------------------------------------------------------------------
+
+router.get('/journal', (req, res) => {
+  if (!req.session.adminAuthed) return res.status(403).json({ error: 'Admin auth required' });
+
+  const sharedPlaylistId = req.query.playlist_id ? parseInt(req.query.playlist_id, 10) : null;
+  const action           = ['added', 'removed'].includes(req.query.action) ? req.query.action : null;
+  const limit            = Math.min(parseInt(req.query.limit  ?? '50',  10), 200);
+  const offset           = Math.max(parseInt(req.query.offset ?? '0',   10), 0);
+
+  if (sharedPlaylistId && isNaN(sharedPlaylistId)) {
+    return res.status(400).json({ error: 'Invalid playlist_id' });
+  }
+
+  try {
+    const entries = db.getJournalPage({ sharedPlaylistId, action, limit, offset });
+    // Attach the human-readable tag to each entry
+    const { buildTag } = require('../poller');
+    const result = entries.map(e => ({
+      ...e,
+      label: buildTag(e.display_name, e.action, e.track_artist, e.track_title, e.playlist_name),
+    }));
+    res.json(result);
+  } catch (err) {
+    console.error('[api] GET /journal', err.message);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+router.get('/journal/stats', (req, res) => {
+  if (!req.session.adminAuthed) return res.status(403).json({ error: 'Admin auth required' });
+  try {
+    res.json(db.getJournalStats());
+  } catch (err) {
+    console.error('[api] GET /journal/stats', err.message);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
