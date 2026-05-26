@@ -1,7 +1,8 @@
 'use strict';
 
 const { WebSocketServer } = require('ws');
-const db = require('../db');
+const db      = require('../db');
+const metrics = require('../metrics');
 
 /** Active authenticated connections. userId (string) -> WebSocket */
 const clients = new Map();
@@ -36,6 +37,7 @@ function initWebSocket(httpServer, sessionParser) {
         existing.close(1000, 'Replaced by newer connection');
       }
       clients.set(ws.userId, ws);
+      metrics.wsActiveConnections.set(clients.size);
 
       try {
         const links = db.getUserLinks(ws.userId);
@@ -55,6 +57,7 @@ function initWebSocket(httpServer, sessionParser) {
     ws.on('close', code => {
       if (ws.userId && clients.get(ws.userId) === ws) {
         clients.delete(ws.userId);
+        metrics.wsActiveConnections.set(clients.size);
       }
       console.log(`[ws] ${ws.userId ?? 'unauthed'} disconnected (code=${code}, online=${clients.size})`);
     });
@@ -106,6 +109,7 @@ function handleAuth(ws, payload) {
   ws.userId          = userId;
   ws.isAuthenticated = true;
   clients.set(userId, ws);
+  metrics.wsActiveConnections.set(clients.size);
 
   const playlistIds = Array.isArray(payload?.shared_playlist_ids) ? payload.shared_playlist_ids : [];
   for (const id of playlistIds) {

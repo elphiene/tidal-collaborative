@@ -63,6 +63,13 @@ const state = {
   syncStatuses:  new Map(),
   adminSettings: { poll_interval_ms: 30000 },
 
+  // Journal
+  journalEntries:   [],
+  journalOffset:    0,
+  journalHasMore:   false,
+  journalStats:     null,
+  journalStatMode:  0,  // 0=all-time 1=7d 2=24h
+
   // Mobile nav
   navOpen: false,
 };
@@ -189,6 +196,21 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('force-poll-btn').addEventListener('click', () => {
     handleForcePoll(document.getElementById('force-poll-btn'));
   });
+
+  // Journal controls (always in DOM)
+  document.getElementById('journal-filter-action').addEventListener('change', () => {
+    state.journalOffset = 0; state.journalEntries = []; fetchJournal();
+  });
+  document.getElementById('journal-filter-playlist').addEventListener('change', () => {
+    state.journalOffset = 0; state.journalEntries = []; fetchJournal();
+  });
+  document.getElementById('journal-refresh-btn').addEventListener('click', () => {
+    state.journalOffset = 0; state.journalEntries = []; fetchJournal(); fetchJournalStats();
+  });
+  document.getElementById('journal-load-more-btn').addEventListener('click', () => {
+    state.journalOffset += 50; fetchJournal(true);
+  });
+  document.getElementById('stat-journal-card').addEventListener('click', cycleJournalStatMode);
 
   // Run setup wizard check — calls checkAuth() when complete
   await initSetupWizard();
@@ -1354,7 +1376,14 @@ async function loadTidalPlaylistsInto(listElId, onSelect) {
 // ---------------------------------------------------------------------------
 
 async function refreshAdmin() {
-  await Promise.allSettled([fetchPlaylists(), fetchUsers(), fetchAdminSettings()]);
+  await Promise.allSettled([
+    fetchPlaylists(), fetchUsers(), fetchAdminSettings(),
+    fetchJournalStats(),
+  ]);
+  // Journal loads after playlists so the filter dropdown is populated
+  state.journalOffset = 0;
+  state.journalEntries = [];
+  await fetchJournal();
 }
 
 async function fetchPlaylists() {
@@ -1469,6 +1498,105 @@ function renderStats() {
   setElText('stat-tracks',    totalTracks);
   setElText('stat-users',     linkedUsers);
   setElText('stat-online',    onlineCount);
+}
+
+// ---------------------------------------------------------------------------
+// Journal
+// ---------------------------------------------------------------------------
+
+async function fetchJournalStats() {
+  try {
+    const res = await apiFetch(`${BASE_URL}/api/journal/stats`);
+    if (!res.ok) return;
+    state.journalStats = await res.json();
+    renderJournalStat();
+  } catch { /* non-fatal */ }
+}
+
+const JOURNAL_STAT_MODES = [
+  { key: 'total',    label: 'Journal Events'    },
+  { key: 'last_7d',  label: 'Events (7 days)'   },
+  { key: 'last_24h', label: 'Events (24 hours)'  },
+];
+
+function renderJournalStat() {
+  if (!state.journalStats) return;
+  const mode = JOURNAL_STAT_MODES[state.journalStatMode];
+  setElText('stat-journal',       state.journalStats[mode.key] ?? '—');
+  setElText('stat-journal-label', mode.label);
+}
+
+function cycleJournalStatMode() {
+  state.journalStatMode = (state.journalStatMode + 1) % JOURNAL_STAT_MODES.length;
+  renderJournalStat();
+}
+
+async function fetchJournal(append = false) {
+  const action     = document.getElementById('journal-filter-action')?.value    || '';
+  const playlistId = document.getElementById('journal-filter-playlist')?.value  || '';
+
+  const params = new URLSearchParams({ limit: 50, offset: state.journalOffset });
+  if (action)     params.set('action',      action);
+  if (playlistId) params.set('playlist_id', playlistId);
+
+  try {
+    const res = await apiFetch(`${BASE_URL}/api/journal?${params}`);
+    if (!res.ok) { renderJournal(); return; }
+    const entries = await res.json();
+
+    if (append) {
+      state.journalEntries.push(...entries);
+    } else {
+      state.journalEntries = entries;
+      populateJournalPlaylistFilter();
+    }
+    state.journalHasMore = entries.length === 50;
+    renderJournal();
+  } catch (err) {
+    console.error('[app] fetchJournal:', err.message);
+    renderJournal();
+  }
+}
+
+function populateJournalPlaylistFilter() {
+  const sel = document.getElementById('journal-filter-playlist');
+  if (!sel) return;
+  const current = sel.value;
+  // Build unique playlist list from loaded playlists
+  const opts = [{ id: '', name: 'All Playlists' }];
+  for (const pl of state.playlists) opts.push({ id: pl.id, name: pl.name });
+  sel.innerHTML = opts.map(o =>
+    `<option value="${o.id}"${String(o.id) === current ? ' selected' : ''}>${escHtml(o.name)}</option>`
+  ).join('');
+}
+
+function renderJournal() {
+  const list     = document.getElementById('journal-list');
+  const moreWrap = document.getElementById('journal-load-more');
+  if (!list) return;
+
+  if (state.journalEntries.length === 0) {
+    list.innerHTML = `<div class="empty-state"><p class="empty-title">No journal entries yet</p></div>`;
+    if (moreWrap) moreWrap.hidden = true;
+    return;
+  }
+
+  list.innerHTML = state.journalEntries.map(e => {
+    const actionClass = e.action === 'added' ? 'journal-action-added' : 'journal-action-removed';
+    const verb        = e.action === 'added' ? 'added'   : 'removed';
+    const prep        = e.action === 'added' ? 'to'      : 'from';
+    const track       = [e.track_artist, e.track_title].filter(Boolean).join(' – ') || '(unknown track)';
+    const playlist    = e.playlist_name ? escHtml(e.playlist_name) : '';
+    const who         = escHtml(e.display_name || e.user_id);
+    const when        = timeAgo(e.created_at);
+    return `
+      <div class="journal-entry">
+        <span class="journal-sentence"><span class="journal-who">${who}</span> <span class="journal-verb ${actionClass}">${verb}</span> <span class="journal-track">${escHtml(track)}</span> ${prep} <span class="journal-playlist">${playlist}</span></span>
+        <span class="journal-time">${when}</span>
+      </div>`;
+  }).join('');
+
+  if (moreWrap) moreWrap.hidden = !state.journalHasMore;
 }
 
 // ---------------------------------------------------------------------------
