@@ -40,7 +40,11 @@ services:
       - tidal-network
 
     healthcheck:
-      test: ["CMD", "curl", "-fs", "http://localhost:3000/api/ping"]
+      # curl isn't in the Alpine image — use wget (busybox built-in).
+      # Matches the Dockerfile HEALTHCHECK directive.
+      # Use 127.0.0.1 explicitly — localhost resolves to ::1 first inside the
+      # container and the server only listens on IPv4.
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/ping | grep -q '\"ok\":true' || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3
