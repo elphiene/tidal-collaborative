@@ -347,6 +347,19 @@ function updateTrackMetadata(tidalTrackId, title, artist) {
 }
 
 /**
+ * A track row regardless of removed_at state — unlike getPlaylistTracks(),
+ * which only returns active rows. Used to look up title/artist metadata
+ * for a track that has just been (or is being) soft-deleted.
+ */
+function getTrackRow(sharedPlaylistId, tidalTrackId) {
+  return db.prepare(`
+    SELECT * FROM tracks
+    WHERE shared_playlist_id = ? AND tidal_track_id = ?
+    ORDER BY id DESC LIMIT 1
+  `).get(sharedPlaylistId, String(tidalTrackId));
+}
+
+/**
  * Soft-delete a track from a shared playlist. Returns the run result.
  */
 function removeTrack(sharedPlaylistId, tidalTrackId) {
@@ -714,6 +727,17 @@ function getUserMaxJournalId(userId, sharedPlaylistId) {
 }
 
 /**
+ * A single user_action row regardless of current_action/tidal_applied state.
+ * Unlike getPendingTidalActions(), which only returns tidal_applied=0 rows.
+ */
+function getUserActionRow(userId, sharedPlaylistId, tidalTrackId) {
+  return db.prepare(`
+    SELECT * FROM user_actions
+    WHERE user_id = ? AND shared_playlist_id = ? AND tidal_track_id = ?
+  `).get(userId, sharedPlaylistId, String(tidalTrackId));
+}
+
+/**
  * user_action rows pending Tidal application (tidal_applied = 0), oldest-first.
  */
 function getPendingTidalActions(userId, sharedPlaylistId) {
@@ -767,6 +791,7 @@ module.exports = {
   clearLinkCursor,
   // tracks
   getPlaylistTracks,
+  getTrackRow,
   getActiveTrackIds,
   getRecentlyDeletedTrackIds,
   addTrack,
@@ -797,6 +822,7 @@ module.exports = {
   getUnflushedUserActions,
   setUserActionJournalId,
   getUserMaxJournalId,
+  getUserActionRow,
   getPendingTidalActions,
   markTidalApplied,
 };

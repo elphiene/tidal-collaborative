@@ -90,7 +90,10 @@ async function getAccessTokenForUser(user) {
  * already called tidalRemoveTrack for them, e.g. propagateRemoveToAllUsers).
  */
 function journalizeRemoval(sharedPlaylistId, trackId, removedBy, { failedUserIds = new Set() } = {}) {
-  const trackRow = db.getPlaylistTracks(sharedPlaylistId).find(t => String(t.tidal_track_id) === String(trackId));
+  // getTrackRow(), unlike getPlaylistTracks(), still finds the row after it's
+  // been soft-deleted — the caller (propagateRemoveToAllUsers) runs after
+  // db.removeTrack() has already set removed_at (AUDIT.md M3).
+  const trackRow = db.getTrackRow(sharedPlaylistId, trackId);
   const title  = trackRow?.track_title  ?? null;
   const artist = trackRow?.track_artist ?? null;
 
@@ -193,7 +196,10 @@ async function stepDetect(link, accessToken) {
   }
 
   for (const trackId of removedIds) {
-    const existing = db.getPendingTidalActions(userId, spId).find(r => String(r.tidal_track_id) === trackId);
+    // getUserActionRow(), unlike getPendingTidalActions(), also finds the row
+    // when tidal_applied=1 — which it is here, since removedIds comes from
+    // getUserActiveTrackIds() (AUDIT.md M3).
+    const existing = db.getUserActionRow(userId, spId, trackId);
     const title  = existing?.track_title  ?? null;
     const artist = existing?.track_artist ?? null;
     db.upsertUserAction(userId, spId, trackId, 'removed', title, artist,
