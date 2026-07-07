@@ -65,34 +65,34 @@ Every removal calls `tidalGetPlaylistItemMap()`, which paginates the whole playl
 ### M3 — Journal entries for web-UI removals lose title/artist — **FIXED** (`64b895c`)
 In the DELETE track route, `db.removeTrack()` soft-deletes the row *before* `journalizeRemoval()` looks it up via `getPlaylistTracks()` (active rows only), so metadata is always null. Same class of bug in `stepDetect`'s removal path, which looks up metadata in `getPendingTidalActions()` (`tidal_applied=0`) although the removed row has `tidal_applied=1`. **Fix:** query the row regardless of `removed_at`/applied state.
 
-### M4 — Session store is in-memory
+### M4 — Session store is in-memory — **FIXED** (`7b25f94`)
 `express-session` default MemoryStore: all sessions drop on every restart/redeploy (users and admin get logged out), and it leaks memory by design. With better-sqlite3 already present, a tiny SQLite-backed store keeps the minimal-deps constraint. Also set `cookie.secure` (behind HTTPS) and `app.set('trust proxy', 1)` if a reverse proxy is used — the code reads `x-forwarded-*` headers but never configures trust-proxy, so those headers are client-spoofable.
 
-### M5 — Encryption key stored alongside the encrypted data
+### M5 — Encryption key stored alongside the encrypted data — **FIXED** (`613f80e`)
 When `ENCRYPTION_KEY` isn't provided via env, it's generated and stored in the same `db.sqlite` as the encrypted Tidal tokens — anyone who obtains the DB file gets the key too. The compose file ships without the env var, so this is the default deployment. Document the tradeoff and recommend setting `ENCRYPTION_KEY` via env/secret in production deployments.
 
-### M6 — CORS wide open + no CSRF tokens
+### M6 — CORS wide open + no CSRF tokens — **FIXED** (`3b14dd3`)
 `app.use(cors())` sets `Access-Control-Allow-Origin: *`. Cookies aren't sent cross-origin with `*` and `sameSite: lax` (default) blocks cross-site POSTs, so the practical risk is low today — but the config invites regressions (e.g., switching to `credentials: true`). Since the UI is same-origin, `cors` can likely be removed entirely (also satisfies the minimal-deps constraint).
 
 ### M7 — Dockerfile healthcheck still uses `localhost` — **FIXED** (`3718289`)
 The compose healthcheck was fixed to `127.0.0.1` (per CLAUDE.md), but the Dockerfile `HEALTHCHECK` — explicitly kept as the fallback — still uses `http://localhost:3000`, which resolves to `::1` first in Alpine while the server listens on IPv4 only. The fallback will report unhealthy exactly when it's needed. One-word fix.
 
-### M8 — Container runs as root
+### M8 — Container runs as root — **FIXED** (`8eda6e8`)
 No `USER` directive in the Dockerfile. Add `USER node` (and `chown` `/app/data`) to limit blast radius.
 
 ---
 
 ## Low
 
-- **L1** — `build.sh` pushes to Docker Hub despite being documented (CLAUDE.md, header comment) as local build+tag only; `publish.sh` exists for pushing. Surprising side effect — remove the push from `build.sh`.
-- **L2** — `master_journal` is documented as append-only/never-deleted, but its FK is `ON DELETE CASCADE` on `shared_playlists` — deleting a playlist erases its history. Same for `addTrack()` hard-deleting soft-deleted rows despite the "soft-delete preserves history" schema comment. Align code or docs.
-- **L3** — Unknown `/api/*` paths fall through to the SPA catch-all and return `index.html` with HTTP 200. Add an `/api` 404 handler before the static/SPA fallback.
-- **L4** — `POST /api/shared-playlists`: if `createLink()` throws after the playlist insert, the client gets a 500 but the playlist exists (no transaction). Wrap in `db.transaction`.
-- **L5** — `journalizeRemoval` is imported in `api.js` but never used there. `engines` says `>=18` while docs standardize on Node 20.
-- **L6** — Invite codes: `base64url → toUpperCase()` collapses case, cutting entropy to ~41 bits over an ambiguous alphabet (`-`, `_` look odd uppercased). Fine for invites, but a hex or A–Z0–9 alphabet would be cleaner. There's also no rate limit on `GET /api/invites/:code` probing.
-- **L7** — `server/.env` contains a real `ENCRYPTION_KEY`/`SESSION_SECRET`, and `data/db.sqlite` + `docker/data/db.sqlite` (real user tokens) sit in the working tree. All are gitignored — verify with `git ls-files` that none were ever committed, and rotate the keys if they were. Treat these files as secrets when sharing the folder.
-- **L8** — `compose pull_policy: always` on the `latest` tag means silent unattended upgrades for CasaOS users; consider versioned tags.
-- **L9** — No test suite (documented constraint). The poller's diff logic (C1, M1) is exactly the kind of pure-ish logic that would be cheap to unit-test with a mocked `tidal.js`.
+- **L1** — **FIXED** (`f6ad13f`) `build.sh` pushes to Docker Hub despite being documented (CLAUDE.md, header comment) as local build+tag only; `publish.sh` exists for pushing. Surprising side effect — remove the push from `build.sh`.
+- **L2** — **FIXED** (`663a10d`) `master_journal` is documented as append-only/never-deleted, but its FK is `ON DELETE CASCADE` on `shared_playlists` — deleting a playlist erases its history. Same for `addTrack()` hard-deleting soft-deleted rows despite the "soft-delete preserves history" schema comment. Align code or docs. (Resolved by fixing the comments — both behaviors are intentional.)
+- **L3** — **FIXED** (`49fcc89`) Unknown `/api/*` paths fall through to the SPA catch-all and return `index.html` with HTTP 200. Add an `/api` 404 handler before the static/SPA fallback.
+- **L4** — **FIXED** (`ff49195`) `POST /api/shared-playlists`: if `createLink()` throws after the playlist insert, the client gets a 500 but the playlist exists (no transaction). Wrap in `db.transaction`.
+- **L5** — **FIXED** (`da718e1`) `journalizeRemoval` is imported in `api.js` but never used there. `engines` says `>=18` while docs standardize on Node 20.
+- **L6** — **FIXED** (`91c9995`) Invite codes: `base64url → toUpperCase()` collapses case, cutting entropy to ~41 bits over an ambiguous alphabet (`-`, `_` look odd uppercased). Fine for invites, but a hex or A–Z0–9 alphabet would be cleaner. There's also no rate limit on `GET /api/invites/:code` probing. (Alphabet left as-is — changing it would break already-shared invite links for no real security gain. Added per-IP rate limiting.)
+- **L7** — **VERIFIED, no action needed.** `server/.env` contains a real `ENCRYPTION_KEY`/`SESSION_SECRET`, and `data/db.sqlite` + `docker/data/db.sqlite` (real user tokens) sit in the working tree. Confirmed via `git check-ignore` and `git log --all --full-history` that these paths are gitignored and were never committed.
+- **L8** — Not actioned. `compose pull_policy: always` on the `latest` tag means silent unattended upgrades for CasaOS users; consider versioned tags. Deployment-model choice for the user, not a code fix.
+- **L9** — Not actioned (documented constraint, no test runner exists). The poller's diff logic (C1, M1) is exactly the kind of pure-ish logic that would be cheap to unit-test with a mocked `tidal.js` — worth revisiting if a test setup is ever added.
 
 ---
 
