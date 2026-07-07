@@ -51,12 +51,7 @@ docker compose -f docker-compose.yml -f docker-compose.build.yml build $NO_CACHE
 docker tag "$IMAGE:latest" "$IMAGE:$VERSION"
 
 echo ""
-echo "→ Pushing to Docker Hub…"
-docker push "$IMAGE:latest"
-docker push "$IMAGE:$VERSION"
-
-echo ""
-echo "✓ Build and push complete!"
+echo "✓ Build complete! (use ./publish.sh to push to Docker Hub)"
 echo ""
 echo "  Images:"
 docker images "$IMAGE" --format "  {{.Repository}}:{{.Tag}}  ({{.Size}})"
