@@ -698,6 +698,23 @@ function getUserAllKnownTrackIds(userId, sharedPlaylistId) {
 }
 
 /**
+ * Track IDs whose removal for this user is CONFIRMED against Tidal
+ * (current_action='removed' AND tidal_applied=1) — i.e. the row can only be
+ * in this state after the track was actually absent from the user's real
+ * Tidal playlist at some point. If one of these reappears in a later scan,
+ * it's unambiguously a genuine re-add, not a removal still propagating
+ * (a pulled-but-not-yet-applied removal is tidal_applied=0, so it's excluded
+ * here — no race with in-flight propagation).
+ */
+function getUserConfirmedRemovedTrackIds(userId, sharedPlaylistId) {
+  const rows = db.prepare(`
+    SELECT tidal_track_id FROM user_actions
+    WHERE user_id = ? AND shared_playlist_id = ? AND current_action = 'removed' AND tidal_applied = 1
+  `).all(userId, sharedPlaylistId);
+  return new Set(rows.map(r => String(r.tidal_track_id)));
+}
+
+/**
  * user_action rows not yet flushed to master_journal (journal_id IS NULL).
  */
 function getUnflushedUserActions(userId, sharedPlaylistId) {
@@ -819,6 +836,7 @@ module.exports = {
   upsertUserAction,
   getUserActiveTrackIds,
   getUserAllKnownTrackIds,
+  getUserConfirmedRemovedTrackIds,
   getUnflushedUserActions,
   setUserActionJournalId,
   getUserMaxJournalId,

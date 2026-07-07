@@ -168,12 +168,16 @@ async function stepDetect(link, accessToken) {
     db.clearLinkCursor(link.id);
   }
 
-  const knownIds  = db.getUserAllKnownTrackIds(userId, spId);  // all rows, any state
-  const activeIds = db.getUserActiveTrackIds(userId, spId);    // current_action='added'
+  const knownIds           = db.getUserAllKnownTrackIds(userId, spId);        // all rows, any state
+  const activeIds          = db.getUserActiveTrackIds(userId, spId);          // current_action='added'
+  const confirmedRemovedIds = db.getUserConfirmedRemovedTrackIds(userId, spId); // current_action='removed', tidal_applied=1
 
-  // Tracks in Tidal not known at all → newly added in Tidal app. Safe even on a
-  // partial fetch — presence in a partial window still proves the track exists.
-  const newIds = [...tidalIds].filter(id => !knownIds.has(id));
+  // Tracks in Tidal not known at all → newly added in Tidal app. Also
+  // treat a track as new if it was previously CONFIRMED removed (tidal_applied=1)
+  // and has now reappeared — that's a genuine re-add from the Tidal app, not a
+  // removal still propagating (AUDIT.md M1). Safe even on a partial fetch —
+  // presence in a partial window still proves the track exists.
+  const newIds = [...tidalIds].filter(id => !knownIds.has(id) || confirmedRemovedIds.has(id));
 
   // Tracks we thought were active but gone from Tidal → removed in Tidal app.
   // Only trustworthy on a COMPLETE from-the-start scan: if this fetch was
