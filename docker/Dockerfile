@@ -25,8 +25,11 @@ COPY server/ ./server/
 #   path.join(__dirname, '../../web-ui')   →  /app/web-ui
 COPY web-ui/ ./web-ui/
 
-# Persistent SQLite storage (mount a volume over this path)
-RUN mkdir -p /app/data
+# Persistent SQLite storage (mount a volume over this path).
+# node:alpine ships a non-root "node" user (uid 1000) — run as that instead
+# of root to limit blast radius (AUDIT.md M8).
+RUN mkdir -p /app/data && chown -R node:node /app/data
+USER node
 
 # ── Runtime environment ──────────────────────────────────────────────────
 ENV NODE_ENV=production \
