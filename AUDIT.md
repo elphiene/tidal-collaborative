@@ -22,27 +22,27 @@ Overall: the codebase is clean, well-commented, and the journal-based sync desig
 
 ## High
 
-### H1 — Missing authorization on destructive playlist endpoints
+### H1 — Missing authorization on destructive playlist endpoints — **FIXED** (`5d58329`)
 `DELETE /api/shared-playlists/:id/tracks/:trackId` and `POST /api/shared-playlists/:id/tracks/reorder` (`api.js` ~340–410) only check that the caller is signed in. **Any** authenticated user can delete any track from any shared playlist — including private ones they are not a member of — and the deletion propagates to every member's real Tidal playlist. Similarly, `DELETE /api/invites/:id` lets any signed-in user revoke any invite.
 
 **Fix:** require the caller to be linked to the playlist (`db.checkLinkExists`) or its creator/admin.
 
-### H2 — Unauthenticated read endpoints leak private data
+### H2 — Unauthenticated read endpoints leak private data — **FIXED** (`3cc6431`)
 These routes have no auth at all: `GET /api/shared-playlists/:id/tracks` (full track list of private playlists), `GET /api/shared-playlists/:id/linked-users` (user IDs, display names, Tidal playlist IDs), `GET /api/links/:userId` (enumerate any user's links; the authenticated `GET /api/links` makes this one redundant), and `GET /api/users` (presence). `/metrics` is also open despite the "local port only" comment — the server binds `0.0.0.0` and compose publishes the port.
 
 **Fix:** require a session on all of these; delete `GET /api/links/:userId`.
 
-### H3 — WebSocket `auth` message allows impersonation
+### H3 — WebSocket `auth` message allows impersonation — **FIXED** (`1de1429`)
 `ws.js handleAuth()` accepts any client-supplied `payload.user_id` with no verification, overriding the session-based auth done at upgrade. An unauthenticated WS client can claim any user ID, receive that user's playlist events and sync-status messages, kick the real user's connection (one socket per user ID), and forge presence rows.
 
 **Fix:** remove the `auth` message path entirely — session auth at upgrade already works — or at minimum require `payload.user_id === req.session.userId`.
 
-### H4 — `POST /api/setup/tidal-client-id` is permanently unauthenticated
+### H4 — `POST /api/setup/tidal-client-id` is permanently unauthenticated — **FIXED** (`f6b4b97`)
 The setup endpoint works even after setup completes, so anyone who can reach the server can overwrite the Tidal Client ID at any time (breaking sign-in, or pointing the OAuth flow at their own Tidal app).
 
 **Fix:** reject if a client ID is already set unless `req.session.adminAuthed`.
 
-### H5 — Admin PIN is brute-forceable and stored in plaintext
+### H5 — Admin PIN is brute-forceable and stored in plaintext — **FIXED** (`cd59d2a`)
 A 4-digit PIN (10,000 combinations), no rate limiting or lockout on `POST /api/admin/auth`, stored in plaintext in `settings`, compared with `!==`. A trivial script gains admin in seconds; admin can force-poll, change settings, and read the full journal. First-run is also a race: whoever reaches a fresh install first sets the PIN.
 
 **Fix:** add per-IP/global attempt throttling with backoff, hash the PIN (scrypt from Node's built-in crypto keeps the no-new-deps constraint), and consider a longer secret.
