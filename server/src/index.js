@@ -1,7 +1,6 @@
 'use strict';
 
 const express = require('express');
-const cors    = require('cors');
 const path    = require('path');
 const session = require('express-session');
 const crypto  = require('crypto');
@@ -63,7 +62,7 @@ const sessionParser = session({
 });
 
 app.use(sessionParser);
-app.use(cors());
+// No CORS middleware: the web UI is same-origin, so none is needed (AUDIT.md M6).
 app.use(express.json());
 
 // REST API (must come before static files so /api routes are not shadowed)
