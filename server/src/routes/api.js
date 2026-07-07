@@ -295,14 +295,13 @@ router.post('/shared-playlists', (req, res) => {
   if (!name) return res.status(400).json({ error: '"name" is required' });
 
   try {
-    const playlist = db.createSharedPlaylist(name, description, req.session.userId ?? null, isPublic);
+    const { playlist, link } = db.createSharedPlaylistWithLink(
+      name, description, req.session.userId ?? null, isPublic,
+      tidalPlaylistId, tidalPlaylistName,
+    );
 
-    let link = null;
-    if (tidalPlaylistId && req.session.userId) {
-      link = db.createLink(playlist.id, req.session.userId, tidalPlaylistId, tidalPlaylistName);
-      // initNewLink handles the pollNow internally
-      initNewLink(link).catch(err => console.error('[api] initNewLink:', err.message));
-    }
+    // initNewLink handles the pollNow internally
+    if (link) initNewLink(link).catch(err => console.error('[api] initNewLink:', err.message));
 
     res.status(201).json({ playlist, link });
   } catch (err) {

@@ -163,6 +163,22 @@ function createSharedPlaylist(name, description = null, createdBy = null, isPubl
   return db.prepare('SELECT * FROM shared_playlists WHERE id = ?').get(info.lastInsertRowid);
 }
 
+/**
+ * Atomically create a shared playlist and, if a Tidal playlist ID is given,
+ * its first link — so a failure creating the link doesn't leave an orphaned
+ * playlist behind with no way for the client to retry cleanly (AUDIT.md L4).
+ */
+function createSharedPlaylistWithLink(name, description, createdBy, isPublic, tidalPlaylistId, tidalPlaylistName) {
+  return db.transaction(() => {
+    const playlist = createSharedPlaylist(name, description, createdBy, isPublic);
+    let link = null;
+    if (tidalPlaylistId && createdBy) {
+      link = createLink(playlist.id, createdBy, tidalPlaylistId, tidalPlaylistName);
+    }
+    return { playlist, link };
+  })();
+}
+
 function updateSharedPlaylist(id, { isPublic }) {
   return db.prepare(
     'UPDATE shared_playlists SET is_public = ? WHERE id = ?',
@@ -794,6 +810,7 @@ module.exports = {
   getSharedPlaylists,
   getPublicPlaylists,
   createSharedPlaylist,
+  createSharedPlaylistWithLink,
   updateSharedPlaylist,
   deleteSharedPlaylist,
   // playlist_links
