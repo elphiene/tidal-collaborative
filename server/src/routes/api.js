@@ -520,8 +520,29 @@ router.delete('/invites/:id', (req, res) => {
   }
 });
 
+// Per-IP throttle for invite-code lookups — codes are ~41 bits of entropy
+// over a small alphabet, fine for invites but worth slowing down brute-force
+// probing (AUDIT.md L6). Signed-in-only already limits this to accounts that
+// completed the Tidal OAuth flow, so the window is generous.
+const inviteLookupAttempts = new Map(); // ip -> { count, windowStart }
+const INVITE_LOOKUP_WINDOW_MS = 60_000;
+const INVITE_LOOKUP_MAX       = 20;
+
 router.get('/invites/:code', (req, res) => {
   if (!req.session.userId) return res.status(401).json({ error: 'Not signed in' });
+
+  const ip     = req.ip || req.socket.remoteAddress || 'unknown';
+  const now    = Date.now();
+  const record = inviteLookupAttempts.get(ip);
+  if (!record || now - record.windowStart > INVITE_LOOKUP_WINDOW_MS) {
+    inviteLookupAttempts.set(ip, { count: 1, windowStart: now });
+  } else {
+    record.count++;
+    if (record.count > INVITE_LOOKUP_MAX) {
+      return res.status(429).json({ error: 'Too many invite lookups — try again in a minute' });
+    }
+  }
+
   const code = req.params.code.trim().toUpperCase();
   try {
     const invite = db.getInviteByCode(code);
