@@ -73,7 +73,8 @@ function initWebSocket(httpServer, sessionParser) {
 }
 
 // ---------------------------------------------------------------------------
-// Message dispatcher — receive-only; only 'auth' message from client is supported
+// Message dispatcher — receive-only; auth is decided at upgrade from the
+// session cookie (see initWebSocket), so no client message can change it.
 // ---------------------------------------------------------------------------
 
 function handleMessage(ws, raw) {
@@ -81,47 +82,13 @@ function handleMessage(ws, raw) {
   try { msg = JSON.parse(raw); }
   catch { return send(ws, { type: 'error', error: 'Invalid JSON' }); }
 
-  const { type, payload } = msg;
+  const { type } = msg;
   if (!type || typeof type !== 'string') {
     return send(ws, { type: 'error', error: 'Missing or invalid message type' });
   }
 
-  if (type === 'auth') return handleAuth(ws, payload);
-
-  // All write operations are now REST-only; WebSocket is receive-only
+  // All write operations are REST-only; WebSocket is receive-only
   send(ws, { type: 'error', error: `"${type}" is not supported over WebSocket — use the REST API` });
-}
-
-// ---------------------------------------------------------------------------
-// Handler: auth (fallback for clients that need explicit auth after connect)
-// ---------------------------------------------------------------------------
-
-function handleAuth(ws, payload) {
-  const userId = payload?.user_id?.trim?.();
-  if (!userId) return send(ws, { type: 'error', error: 'auth requires payload.user_id' });
-
-  const existing = clients.get(userId);
-  if (existing && existing !== ws && existing.readyState === existing.OPEN) {
-    console.log(`[ws] replacing stale connection for user ${userId}`);
-    existing.close(1000, 'Replaced by newer connection');
-  }
-
-  ws.userId          = userId;
-  ws.isAuthenticated = true;
-  clients.set(userId, ws);
-  metrics.wsActiveConnections.set(clients.size);
-
-  const playlistIds = Array.isArray(payload?.shared_playlist_ids) ? payload.shared_playlist_ids : [];
-  for (const id of playlistIds) {
-    const spId = parseInt(id, 10);
-    if (spId && !isNaN(spId)) {
-      try { db.updateUserLastSeen(userId, spId); }
-      catch (err) { console.warn(`[ws] updateUserLastSeen failed: ${err.message}`); }
-    }
-  }
-
-  console.log(`[ws] user ${userId} auth'd (${clients.size} online)`);
-  send(ws, { type: 'auth_ok', user_id: userId, ts: Date.now() });
 }
 
 // ---------------------------------------------------------------------------
