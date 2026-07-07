@@ -325,6 +325,9 @@ router.delete('/shared-playlists/:id', (req, res) => {
 });
 
 router.get('/shared-playlists/:id/tracks', (req, res) => {
+  if (!req.session.userId && !req.session.adminAuthed) {
+    return res.status(401).json({ error: 'Not signed in' });
+  }
   const id = parseInt(req.params.id, 10);
   if (isNaN(id)) return res.status(400).json({ error: 'Invalid id' });
   try {
@@ -509,17 +512,6 @@ router.get('/invites/:code', (req, res) => {
 // Playlist links
 // ---------------------------------------------------------------------------
 
-router.get('/links/:userId', (req, res) => {
-  const { userId } = req.params;
-  if (!userId) return res.status(400).json({ error: 'userId is required' });
-  try {
-    res.json(db.getUserLinks(userId));
-  } catch (err) {
-    console.error('[api] GET /links/:userId', err.message);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
 router.get('/links', (req, res) => {
   if (!req.session.userId) return res.status(401).json({ error: 'Not signed in' });
   try {
@@ -619,6 +611,9 @@ router.post('/links/:id/sync', async (req, res) => {
 });
 
 router.get('/shared-playlists/:id/linked-users', (req, res) => {
+  if (!req.session.userId && !req.session.adminAuthed) {
+    return res.status(401).json({ error: 'Not signed in' });
+  }
   const id = parseInt(req.params.id, 10);
   if (isNaN(id)) return res.status(400).json({ error: 'Invalid id' });
   try {
@@ -658,7 +653,10 @@ router.get('/setup/redirect-uri', (req, res) => {
 // Users (presence)
 // ---------------------------------------------------------------------------
 
-router.get('/users', (_req, res) => {
+router.get('/users', (req, res) => {
+  if (!req.session.userId && !req.session.adminAuthed) {
+    return res.status(401).json({ error: 'Not signed in' });
+  }
   try {
     res.json(db.getActiveUsers());
   } catch (err) {
