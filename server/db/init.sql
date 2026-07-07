@@ -37,7 +37,12 @@ CREATE TABLE IF NOT EXISTS playlist_links (
   UNIQUE(shared_playlist_id, user_id)
 );
 
--- Track membership in shared playlists (soft-delete preserves history)
+-- Track membership in shared playlists. Soft-delete keeps a removed track's
+-- row around briefly (used by getRecentlyDeletedTrackIds() to guard against
+-- resurrecting a track mid-propagation) — but it is NOT permanent history:
+-- db.addTrack() hard-deletes a track's soft-deleted row before re-inserting
+-- it, since the partial unique index below only covers removed_at IS NULL.
+-- master_journal is the actual permanent, append-only history.
 CREATE TABLE IF NOT EXISTS tracks (
   id                 INTEGER PRIMARY KEY AUTOINCREMENT,
   shared_playlist_id INTEGER NOT NULL REFERENCES shared_playlists(id) ON DELETE CASCADE,
@@ -93,7 +98,10 @@ CREATE INDEX IF NOT EXISTS idx_invites_code     ON playlist_invites(code);
 -- (after deduplication of any existing data) rather than here.
 -- idx_tracks_active_unique ON tracks(shared_playlist_id, tidal_track_id) WHERE removed_at IS NULL
 
--- Append-only global event log — never updated or deleted
+-- Append-only global event log — rows are never updated or individually
+-- deleted. They DO cascade-delete if their shared_playlist is deleted
+-- (ON DELETE CASCADE below) — deleting a playlist is a deliberate "erase
+-- everything about it" action, not a violation of append-only-ness.
 CREATE TABLE IF NOT EXISTS master_journal (
   id                 INTEGER PRIMARY KEY AUTOINCREMENT,
   action             TEXT    NOT NULL,           -- 'added' | 'removed'
