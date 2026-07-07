@@ -6,15 +6,17 @@ const path    = require('path');
 const session = require('express-session');
 const crypto  = require('crypto');
 
-const db      = require('./db');
-const config  = require('./config');
-const metrics = require('./metrics');
+const db                 = require('./db');
+const config             = require('./config');
+const metrics            = require('./metrics');
+const SqliteSessionStore = require('./sessionStore');
 
 // ---------------------------------------------------------------------------
 // Startup — DB must init first so we can load/generate secrets
 // ---------------------------------------------------------------------------
 
 db.init();
+db.pruneExpiredSessions();
 
 // ENCRYPTION_KEY: env var → DB → generate new
 let encKey = process.env.ENCRYPTION_KEY || db.getSetting('encryption_key');
@@ -47,13 +49,16 @@ const app = express();
 
 // Session middleware — must come before routes
 const sessionParser = session({
+  store:             new SqliteSessionStore(),
   secret:            sessSecret,
   resave:            false,
   saveUninitialized: false,
   cookie: {
     httpOnly: true,
     maxAge:   30 * 24 * 60 * 60 * 1000, // 30 days
-    // sameSite: 'lax' is the default; set secure: true if using HTTPS
+    // cookie.secure is intentionally NOT set: this deployment is reachable
+    // directly over plain HTTP on LAN/VPN, not always behind TLS-terminating
+    // reverse proxy — secure:true would break sign-in there.
   },
 });
 

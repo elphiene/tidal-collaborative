@@ -786,6 +786,35 @@ function markTidalApplied(id) {
 }
 
 // ---------------------------------------------------------------------------
+// sessions (backs the custom express-session Store — AUDIT.md M4)
+// ---------------------------------------------------------------------------
+
+function getSession(sid) {
+  return db.prepare('SELECT * FROM sessions WHERE sid = ?').get(sid);
+}
+
+function upsertSession(sid, data, expiresAt) {
+  return db.prepare(`
+    INSERT INTO sessions (sid, data, expires_at) VALUES (?, ?, ?)
+    ON CONFLICT(sid) DO UPDATE SET data = excluded.data, expires_at = excluded.expires_at
+  `).run(sid, data, expiresAt);
+}
+
+function deleteSession(sid) {
+  return db.prepare('DELETE FROM sessions WHERE sid = ?').run(sid);
+}
+
+/**
+ * Remove expired sessions. There's no background job in this single-process
+ * app, so this only runs at startup — expired rows can accumulate for the
+ * lifetime of a run, which is an acceptable trade-off (same class as other
+ * homelab-scale trade-offs already documented in docs/DECISIONS.md).
+ */
+function pruneExpiredSessions() {
+  return db.prepare('DELETE FROM sessions WHERE expires_at < ?').run(Date.now());
+}
+
+// ---------------------------------------------------------------------------
 // Exports
 // ---------------------------------------------------------------------------
 
@@ -860,4 +889,9 @@ module.exports = {
   getUserActionRow,
   getPendingTidalActions,
   markTidalApplied,
+  // sessions
+  getSession,
+  upsertSession,
+  deleteSession,
+  pruneExpiredSessions,
 };

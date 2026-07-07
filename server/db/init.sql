@@ -70,6 +70,16 @@ CREATE TABLE IF NOT EXISTS settings (
   value TEXT NOT NULL
 );
 
+-- express-session store (AUDIT.md M4) — replaces the default in-memory
+-- MemoryStore, which dropped every session on restart/redeploy and leaked
+-- memory by design.
+CREATE TABLE IF NOT EXISTS sessions (
+  sid        TEXT PRIMARY KEY,
+  data       TEXT    NOT NULL,
+  expires_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
+
 -- Authenticated users (tokens stored encrypted)
 CREATE TABLE IF NOT EXISTS users (
   user_id           TEXT    PRIMARY KEY,
