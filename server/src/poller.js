@@ -7,6 +7,7 @@ const {
   refreshTokens,
   tidalGetPlaylistTrackIds,
   tidalGetPlaylistTrackList,
+  tidalGetPlaylistItemMap,
   tidalGetTrackInfo,
   tidalAddTrack,
   tidalRemoveTrack,
@@ -294,13 +295,19 @@ async function stepApply(link, accessToken) {
   const pending = db.getPendingTidalActions(userId, spId);
   if (pending.length === 0) return;
 
+  // Fetch the playlist item map at most once per call, not once per pending
+  // removal (AUDIT.md M2) — several pending removals for the same playlist
+  // otherwise each re-fetch the whole thing.
+  let removalItemMap = null;
+
   for (const row of pending) {
     try {
       if (row.current_action === 'added') {
         await tidalAddTrack(tidalPlaylistId, row.tidal_track_id, accessToken);
         metrics.propagationsTotal.inc();
       } else {
-        await tidalRemoveTrack(tidalPlaylistId, row.tidal_track_id, accessToken);
+        if (!removalItemMap) removalItemMap = await tidalGetPlaylistItemMap(tidalPlaylistId, accessToken);
+        await tidalRemoveTrack(tidalPlaylistId, row.tidal_track_id, accessToken, removalItemMap);
       }
       db.markTidalApplied(row.id);
       console.log(`[poller] applied ${row.current_action === 'added' ? '+' : '-'}${row.tidal_track_id} → "${userId}"`);
@@ -525,10 +532,15 @@ async function syncPlaylistForLink(link, accessToken) {
   const deletedIds = db.getRecentlyDeletedTrackIds(sharedPlaylistId);
   let added = 0, merged = 0, duplicatesFixed = 0;
 
+  // Fetched at most once, on the first duplicate found — not once per
+  // duplicate removal (AUDIT.md M2).
+  let dedupItemMap = null;
+
   for (const [id, count] of tidalCounts) {
     if (count > 1) {
+      if (!dedupItemMap) dedupItemMap = await tidalGetPlaylistItemMap(tidalPlaylistId, accessToken);
       for (let i = 0; i < count - 1; i++) {
-        try { await tidalRemoveTrack(tidalPlaylistId, id, accessToken); duplicatesFixed++; }
+        try { await tidalRemoveTrack(tidalPlaylistId, id, accessToken, dedupItemMap); duplicatesFixed++; }
         catch (err) { console.warn(`[sync] could not remove Tidal duplicate ${id}: ${err.message}`); }
         await new Promise(r => setTimeout(r, 300));
       }

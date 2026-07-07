@@ -787,10 +787,14 @@ router.post('/admin/dedup-playlists', async (req, res) => {
       for (const id of rawIds) counts.set(id, (counts.get(id) ?? 0) + 1);
 
       const fixed = [];
+      // Fetched at most once per link, on the first duplicate found — not once
+      // per duplicate track id (AUDIT.md M2).
+      let dedupItemMap = null;
       for (const [id, count] of counts) {
         if (count <= 1) continue;
         try {
-          await tidal.tidalRemoveTrack(link.tidal_playlist_id, id, accessToken);
+          if (!dedupItemMap) dedupItemMap = await tidal.tidalGetPlaylistItemMap(link.tidal_playlist_id, accessToken);
+          await tidal.tidalRemoveTrack(link.tidal_playlist_id, id, accessToken, dedupItemMap);
           await new Promise(r => setTimeout(r, 300));
           await tidal.tidalAddTrack(link.tidal_playlist_id, id, accessToken);
           fixed.push({ id, removedCount: count - 1 });

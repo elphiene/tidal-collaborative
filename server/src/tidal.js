@@ -256,8 +256,9 @@ async function tidalAddTrack(playlistId, trackId, accessToken) {
 }
 
 /**
- * Fetch a Map of trackId → itemId for all items in a playlist.
- * The Tidal DELETE endpoint requires meta.itemId (the playlist item ID).
+ * Fetch a Map of trackId → itemId[] for all items in a playlist (an array
+ * per track since a track can appear more than once). The Tidal DELETE
+ * endpoint requires meta.itemId (the playlist item ID).
  */
 async function tidalGetPlaylistItemMap(playlistId, accessToken) {
   const map  = new Map();
@@ -267,7 +268,10 @@ async function tidalGetPlaylistItemMap(playlistId, accessToken) {
     const data  = await tidalFetch(path, accessToken, { method: 'GET' });
     const items = data?.data ?? [];
     for (const item of items) {
-      if (item.id) map.set(String(item.id), item.meta?.itemId ?? item.id);
+      if (!item.id) continue;
+      const key = String(item.id);
+      if (!map.has(key)) map.set(key, []);
+      map.get(key).push(item.meta?.itemId ?? item.id);
     }
     const nextCursorToken = data?.links?.meta?.nextCursor ?? null;
     if (!nextCursorToken || items.length === 0) break;
@@ -279,18 +283,24 @@ async function tidalGetPlaylistItemMap(playlistId, accessToken) {
 
 /**
  * Remove a track from a playlist.
- * Fetches the playlist item map to resolve the required meta.itemId.
+ * Resolves the required meta.itemId via the playlist item map. Pass an
+ * itemMap already fetched with tidalGetPlaylistItemMap() to avoid
+ * re-fetching the whole playlist on every call when removing several
+ * tracks from the same playlist in one pass (AUDIT.md M2) — each call
+ * consumes one itemId per track so repeated removals of a duplicated
+ * track still resolve to distinct playlist entries.
  */
-async function tidalRemoveTrack(playlistId, trackId, accessToken) {
-  const itemMap = await tidalGetPlaylistItemMap(playlistId, accessToken);
-  const itemId  = itemMap.get(String(trackId));
+async function tidalRemoveTrack(playlistId, trackId, accessToken, itemMap = null) {
+  const map     = itemMap ?? await tidalGetPlaylistItemMap(playlistId, accessToken);
+  const key     = String(trackId);
+  const itemId  = map.get(key)?.shift();
   if (!itemId) {
     // Track not in playlist — nothing to remove
     return;
   }
   await tidalFetch(`/playlists/${playlistId}/relationships/items`, accessToken, {
     method: 'DELETE',
-    body:   JSON.stringify({ data: [{ id: String(trackId), type: 'tracks', meta: { itemId } }] }),
+    body:   JSON.stringify({ data: [{ id: key, type: 'tracks', meta: { itemId } }] }),
   });
 }
 
@@ -390,6 +400,7 @@ module.exports = {
   tidalGetUserPlaylists,
   tidalGetPlaylistTrackIds,
   tidalGetPlaylistTrackList,
+  tidalGetPlaylistItemMap,
   tidalAddTrack,
   tidalRemoveTrack,
   tidalGetTrackInfo,
