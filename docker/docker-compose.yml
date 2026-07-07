@@ -35,6 +35,12 @@ services:
       - NODE_ENV=production
       - PORT=3000
       - DB_PATH=/app/data/db.sqlite
+      # Recommended for production: set these explicitly (see server/.env.example
+      # for how to generate them) rather than relying on the auto-generated
+      # fallback, which stores the key in the same SQLite file as the data it
+      # encrypts — anyone who obtains db.sqlite gets the key too (AUDIT.md M5).
+      # - ENCRYPTION_KEY=
+      # - SESSION_SECRET=
 
     networks:
       - tidal-network
