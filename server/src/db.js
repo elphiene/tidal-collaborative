@@ -203,8 +203,22 @@ function createLink(sharedPlaylistId, userId, tidalPlaylistId, tidalPlaylistName
   return db.prepare('SELECT * FROM playlist_links WHERE id = ?').get(info.lastInsertRowid);
 }
 
+/**
+ * Deletes a link AND its user_actions rows for that (user, shared_playlist).
+ * Leaving user_actions behind causes AUDIT.md C2: re-linking later compares
+ * the new Tidal playlist against stale rows and everything missing gets
+ * detected as removed and propagated to every other collaborator.
+ */
 function deleteLink(id) {
-  return db.prepare('DELETE FROM playlist_links WHERE id = ?').run(id);
+  const link = db.prepare('SELECT * FROM playlist_links WHERE id = ?').get(id);
+  if (!link) return { changes: 0 };
+  const tx = db.transaction(() => {
+    db.prepare('DELETE FROM user_actions WHERE user_id = ? AND shared_playlist_id = ?')
+      .run(link.user_id, link.shared_playlist_id);
+    db.prepare('DELETE FROM playlist_links WHERE id = ?').run(id);
+  });
+  tx();
+  return { changes: 1 };
 }
 
 function getLinkById(id) {
@@ -465,8 +479,12 @@ function getUser(userId) {
 }
 
 function deleteUser(userId) {
-  db.prepare('DELETE FROM playlist_links WHERE user_id = ?').run(userId);
-  return db.prepare('DELETE FROM users WHERE user_id = ?').run(userId);
+  const tx = db.transaction(() => {
+    db.prepare('DELETE FROM user_actions WHERE user_id = ?').run(userId);
+    db.prepare('DELETE FROM playlist_links WHERE user_id = ?').run(userId);
+    db.prepare('DELETE FROM users WHERE user_id = ?').run(userId);
+  });
+  return tx();
 }
 
 /**
