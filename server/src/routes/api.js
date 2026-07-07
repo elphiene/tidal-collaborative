@@ -346,6 +346,10 @@ router.delete('/shared-playlists/:id/tracks/:trackId', async (req, res) => {
   const trackId = String(req.params.trackId).trim();
   if (isNaN(spId) || !trackId) return res.status(400).json({ error: 'Invalid parameters' });
 
+  if (!req.session.adminAuthed && !db.checkLinkExists(spId, req.session.userId)) {
+    return res.status(403).json({ error: 'Forbidden — not a member of this playlist' });
+  }
+
   try {
     const result = db.removeTrack(spId, trackId);
     if (result.changes === 0) return res.status(404).json({ error: 'Track not found or already removed' });
@@ -381,6 +385,10 @@ router.post('/shared-playlists/:id/tracks/reorder', (req, res) => {
   if (isNaN(spId)) return res.status(400).json({ error: 'Invalid id' });
   if (!Array.isArray(positions) || positions.length === 0) {
     return res.status(400).json({ error: '"positions" array is required' });
+  }
+
+  if (!req.session.adminAuthed && !db.checkLinkExists(spId, req.session.userId)) {
+    return res.status(403).json({ error: 'Forbidden — not a member of this playlist' });
   }
 
   const normalised = [];
@@ -464,6 +472,14 @@ router.delete('/invites/:id', (req, res) => {
   if (isNaN(id)) return res.status(400).json({ error: 'Invalid id' });
 
   try {
+    const invite = db.getInviteById(id);
+    if (!invite) return res.status(404).json({ error: 'Invite not found or already revoked' });
+    const playlists = db.getSharedPlaylists();
+    const pl = playlists.find(p => p.id === invite.shared_playlist_id);
+    if (pl && pl.created_by !== req.session.userId && !req.session.adminAuthed) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+
     const result = db.revokeInvite(id);
     if (result.changes === 0) return res.status(404).json({ error: 'Invite not found or already revoked' });
     res.json({ ok: true });

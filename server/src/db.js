@@ -389,6 +389,10 @@ function getInvitesByPlaylist(sharedPlaylistId) {
   ).all(sharedPlaylistId);
 }
 
+function getInviteById(id) {
+  return db.prepare('SELECT * FROM playlist_invites WHERE id = ?').get(id);
+}
+
 function getInviteByCode(code) {
   return db.prepare(
     'SELECT * FROM playlist_invites WHERE code = ? AND revoked_at IS NULL',
@@ -778,6 +782,7 @@ module.exports = {
   // playlist_invites
   createInvite,
   getInvitesByPlaylist,
+  getInviteById,
   getInviteByCode,
   revokeInvite,
   // master_journal
