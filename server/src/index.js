@@ -70,6 +70,11 @@ app.get('/metrics', async (_req, res) => {
   res.end(await metrics.register.metrics());
 });
 
+// Unmatched /api/* paths must 404, not fall through to the SPA catch-all below
+app.use('/api', (_req, res) => {
+  res.status(404).json({ error: 'Not found' });
+});
+
 // Serve web UI as static files
 const webUiDir = path.join(__dirname, '../../web-ui');
 app.use(express.static(webUiDir));
