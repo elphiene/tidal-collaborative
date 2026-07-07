@@ -143,6 +143,7 @@ async function propagateRemoveToAllUsers(sharedPlaylistId, trackId, removedBy = 
 async function stepDetect(link, accessToken) {
   const { tidal_playlist_id: tidalPlaylistId, shared_playlist_id: spId, user_id: userId } = link;
   const displayName = link.tidal_playlist_name || tidalPlaylistId;
+  const startedFromCursor = link.scan_cursor != null;
 
   const { ids: tidalIds, truncated, nextCursor } =
     await tidalGetPlaylistTrackIds(tidalPlaylistId, accessToken, link.scan_cursor ?? null);
@@ -158,10 +159,22 @@ async function stepDetect(link, accessToken) {
   const knownIds  = db.getUserAllKnownTrackIds(userId, spId);  // all rows, any state
   const activeIds = db.getUserActiveTrackIds(userId, spId);    // current_action='added'
 
-  // Tracks in Tidal not known at all → newly added in Tidal app
-  const newIds     = [...tidalIds].filter(id => !knownIds.has(id));
-  // Tracks we thought were active but gone from Tidal → removed in Tidal app
-  const removedIds = [...activeIds].filter(id => !tidalIds.has(id));
+  // Tracks in Tidal not known at all → newly added in Tidal app. Safe even on a
+  // partial fetch — presence in a partial window still proves the track exists.
+  const newIds = [...tidalIds].filter(id => !knownIds.has(id));
+
+  // Tracks we thought were active but gone from Tidal → removed in Tidal app.
+  // Only trustworthy on a COMPLETE from-the-start scan: if this fetch was
+  // truncated (hit MAX_PAGES) or resumed from a saved cursor, tidalIds is only
+  // a partial window of the playlist, and every active track outside that
+  // window would incorrectly look "removed" (AUDIT.md C1).
+  const completeScan = !startedFromCursor && !truncated;
+  const removedIds = completeScan
+    ? [...activeIds].filter(id => !tidalIds.has(id))
+    : [];
+  if (!completeScan && activeIds.size > 0) {
+    console.log(`[poller] "${displayName}": partial scan (cursor=${startedFromCursor}, truncated=${truncated}) — skipping removal detection`);
+  }
 
   for (const trackId of newIds) {
     const { title, artist } = await tidalGetTrackInfo(trackId, accessToken);
