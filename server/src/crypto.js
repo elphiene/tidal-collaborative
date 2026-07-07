@@ -1,6 +1,6 @@
 'use strict';
 
-const { createCipheriv, createDecipheriv, randomBytes } = require('crypto');
+const { createCipheriv, createDecipheriv, randomBytes, scryptSync, timingSafeEqual } = require('crypto');
 
 const ALGO = 'aes-256-gcm';
 
@@ -31,4 +31,26 @@ function decrypt(stored) {
   return d.update(Buffer.from(encHex, 'hex')).toString('utf8') + d.final('utf8');
 }
 
-module.exports = { encrypt, decrypt };
+/**
+ * Hash a short secret (e.g. the admin PIN) for storage.
+ * Returns "<salt_hex>:<hash_hex>".
+ */
+function hashPin(pin) {
+  const salt = randomBytes(16);
+  const hash = scryptSync(pin, salt, 64);
+  return `${salt.toString('hex')}:${hash.toString('hex')}`;
+}
+
+/**
+ * Verify a secret against a hashPin() output. Timing-safe.
+ */
+function verifyPinHash(pin, stored) {
+  const [saltHex, hashHex] = stored.split(':');
+  if (!saltHex || !hashHex) return false;
+  const salt     = Buffer.from(saltHex, 'hex');
+  const expected = Buffer.from(hashHex, 'hex');
+  const actual   = scryptSync(pin, salt, expected.length);
+  return actual.length === expected.length && timingSafeEqual(actual, expected);
+}
+
+module.exports = { encrypt, decrypt, hashPin, verifyPinHash };

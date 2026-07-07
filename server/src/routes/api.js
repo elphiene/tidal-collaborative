@@ -3,7 +3,7 @@
 const { Router }           = require('express');
 const nodeCrypto           = require('node:crypto');
 const db                   = require('../db');
-const { encrypt }          = require('../crypto');
+const { encrypt, hashPin, verifyPinHash } = require('../crypto');
 const tidal                = require('../tidal');
 const {
   pollNow,
@@ -125,16 +125,46 @@ router.post('/admin/setup', (req, res) => {
   if (db.getSetting('admin_pin')) return res.status(409).json({ error: 'PIN already set' });
   const pin = String(req.body?.pin ?? '').trim();
   if (pin.length !== 4) return res.status(400).json({ error: 'PIN must be 4 digits' });
-  db.setSetting('admin_pin', pin);
+  db.setSetting('admin_pin', hashPin(pin));
   req.session.adminAuthed = true;
   req.session.save(() => res.json({ ok: true }));
 });
 
+// Per-IP brute-force throttling for /admin/auth. In-memory is fine — a
+// restart resetting attempt counts is an acceptable trade-off for a
+// single-process, no-DB-migration app (AUDIT.md H5).
+const adminAuthAttempts = new Map(); // ip -> { count, lockedUntil }
+const ADMIN_AUTH_MAX_ATTEMPTS    = 5;
+const ADMIN_AUTH_BASE_LOCKOUT    = 30_000;
+const ADMIN_AUTH_MAX_BACKOFF_EXP = 6; // caps lockout at BASE * 2^6 = 32min
+
 router.post('/admin/auth', (req, res) => {
   const stored = db.getSetting('admin_pin');
   if (!stored) return res.status(400).json({ error: 'No PIN set yet' });
+
+  const ip     = req.ip || req.socket.remoteAddress || 'unknown';
+  const record = adminAuthAttempts.get(ip);
+  if (record?.lockedUntil && record.lockedUntil > Date.now()) {
+    const retryAfterSec = Math.ceil((record.lockedUntil - Date.now()) / 1000);
+    return res.status(429).json({ error: `Too many attempts — try again in ${retryAfterSec}s` });
+  }
+
   const pin = String(req.body?.pin ?? '').trim();
-  if (pin !== stored) return res.status(401).json({ error: 'Incorrect PIN' });
+  // Stored PINs predating this fix are still plaintext — accept once, then migrate to a hash.
+  const isLegacyPlaintext = !stored.includes(':');
+  const ok = isLegacyPlaintext ? pin === stored : verifyPinHash(pin, stored);
+
+  if (!ok) {
+    const count = (record?.count ?? 0) + 1;
+    const lockedUntil = count >= ADMIN_AUTH_MAX_ATTEMPTS
+      ? Date.now() + ADMIN_AUTH_BASE_LOCKOUT * 2 ** Math.min(count - ADMIN_AUTH_MAX_ATTEMPTS, ADMIN_AUTH_MAX_BACKOFF_EXP)
+      : null;
+    adminAuthAttempts.set(ip, { count, lockedUntil });
+    return res.status(401).json({ error: 'Incorrect PIN' });
+  }
+
+  adminAuthAttempts.delete(ip);
+  if (isLegacyPlaintext) db.setSetting('admin_pin', hashPin(pin));
   req.session.adminAuthed = true;
   req.session.save(() => res.json({ ok: true }));
 });
