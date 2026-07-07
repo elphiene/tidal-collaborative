@@ -84,10 +84,12 @@ async function getAccessTokenForUser(user) {
 /**
  * Write a removal event to the journal and queue it in every linked user's
  * user_actions table.  Called by the REST API when a track is deleted via
- * the web UI.  tidalAlreadyApplied=true means the caller has already
- * called tidalRemoveTrack for all users (propagateRemoveToAllUsers path).
+ * the web UI.  failedUserIds lists users whose Tidal removal did NOT
+ * succeed (or was never attempted) — they're left tidal_applied=0 so
+ * stepApply retries them; everyone else is stamped applied (the caller
+ * already called tidalRemoveTrack for them, e.g. propagateRemoveToAllUsers).
  */
-function journalizeRemoval(sharedPlaylistId, trackId, removedBy, { tidalAlreadyApplied = false } = {}) {
+function journalizeRemoval(sharedPlaylistId, trackId, removedBy, { failedUserIds = new Set() } = {}) {
   const trackRow = db.getPlaylistTracks(sharedPlaylistId).find(t => String(t.tidal_track_id) === String(trackId));
   const title  = trackRow?.track_title  ?? null;
   const artist = trackRow?.track_artist ?? null;
@@ -96,9 +98,10 @@ function journalizeRemoval(sharedPlaylistId, trackId, removedBy, { tidalAlreadyA
 
   const links = db.getPlaylistLinks(sharedPlaylistId);
   for (const link of links) {
+    const applied = !failedUserIds.has(link.user_id);
     db.upsertUserAction(link.user_id, sharedPlaylistId, trackId, 'removed', title, artist, {
       tidalOrigin:  0,
-      tidalApplied: tidalAlreadyApplied ? 1 : 0,
+      tidalApplied: applied ? 1 : 0,
       journalId:    entry.id,
     });
   }
@@ -112,20 +115,26 @@ function journalizeRemoval(sharedPlaylistId, trackId, removedBy, { tidalAlreadyA
  */
 async function propagateRemoveToAllUsers(sharedPlaylistId, trackId, removedBy = null) {
   const links = db.getPlaylistLinks(sharedPlaylistId);
+  const failedUserIds = new Set();
   for (const link of links) {
     const user = db.getUser(link.user_id);
-    if (!user || user.sync_status === 'token_revoked') continue;
+    if (!user || user.sync_status === 'token_revoked') {
+      failedUserIds.add(link.user_id);
+      continue;
+    }
     try {
       const token = await getAccessTokenForUser(user);
       await tidalRemoveTrack(link.tidal_playlist_id, trackId, token);
       console.log(`[poller] propagated -${trackId} → "${user.display_name || link.user_id}"`);
     } catch (err) {
       console.error(`[poller] propagate remove failed for "${link.user_id}": ${err.message}`);
+      failedUserIds.add(link.user_id);
     }
   }
-  // Journal the removal so it appears in the audit log (tidalAlreadyApplied=true)
+  // Journal the removal so it appears in the audit log. Users whose removal
+  // above failed (AUDIT.md H6) keep tidal_applied=0 and get retried by stepApply.
   try {
-    journalizeRemoval(sharedPlaylistId, trackId, removedBy ?? 'admin', { tidalAlreadyApplied: true });
+    journalizeRemoval(sharedPlaylistId, trackId, removedBy ?? 'admin', { failedUserIds });
   } catch (err) {
     console.warn('[poller] journalizeRemoval failed:', err.message);
   }
