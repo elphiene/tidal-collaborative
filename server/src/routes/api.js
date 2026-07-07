@@ -635,6 +635,10 @@ router.get('/setup/status', (_req, res) => {
 });
 
 router.post('/setup/tidal-client-id', (req, res) => {
+  const alreadySet = !!(process.env.TIDAL_CLIENT_ID || db.getSetting('tidal_client_id'));
+  if (alreadySet && !req.session.adminAuthed) {
+    return res.status(403).json({ error: 'Tidal Client ID already set — admin auth required to change it' });
+  }
   const clientId = String(req.body?.clientId ?? '').trim();
   if (!clientId) return res.status(400).json({ error: 'clientId is required' });
   db.setSetting('tidal_client_id', clientId);
