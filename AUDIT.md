@@ -56,13 +56,13 @@ A 4-digit PIN (10,000 combinations), no rate limiting or lockout on `POST /api/a
 
 ## Medium
 
-### M1 — Tracks re-added from the Tidal app are never detected
+### M1 — Tracks re-added from the Tidal app are never detected — **FIXED** (`238fca3`)
 `stepDetect` computes `newIds` against `getUserAllKnownTrackIds()` (rows in *any* state). A track the user removed and later re-adds in the Tidal app is already "known" (state `removed`), so the re-add is silently ignored forever — contradicting the intent of `getRecentlyDeletedTrackIds()`'s propagation window (which is only used by manual force-sync). **Fix:** treat tracks present in Tidal whose `current_action='removed'` (and outside the recent-deletion window) as adds.
 
-### M2 — `tidalRemoveTrack` fetches the entire playlist per removal
+### M2 — `tidalRemoveTrack` fetches the entire playlist per removal — **FIXED** (`51d6fbe`)
 Every removal calls `tidalGetPlaylistItemMap()`, which paginates the whole playlist (150 ms per page). `propagateRemoveToAllUsers` does this once per user; the dedup endpoint does it per duplicate. On large playlists this is an O(N) API storm per removal and a likely 429 source. **Fix:** cache the item map per (playlist, poll cycle), or batch removals.
 
-### M3 — Journal entries for web-UI removals lose title/artist
+### M3 — Journal entries for web-UI removals lose title/artist — **FIXED** (`64b895c`)
 In the DELETE track route, `db.removeTrack()` soft-deletes the row *before* `journalizeRemoval()` looks it up via `getPlaylistTracks()` (active rows only), so metadata is always null. Same class of bug in `stepDetect`'s removal path, which looks up metadata in `getPendingTidalActions()` (`tidal_applied=0`) although the removed row has `tidal_applied=1`. **Fix:** query the row regardless of `removed_at`/applied state.
 
 ### M4 — Session store is in-memory
@@ -74,7 +74,7 @@ When `ENCRYPTION_KEY` isn't provided via env, it's generated and stored in the s
 ### M6 — CORS wide open + no CSRF tokens
 `app.use(cors())` sets `Access-Control-Allow-Origin: *`. Cookies aren't sent cross-origin with `*` and `sameSite: lax` (default) blocks cross-site POSTs, so the practical risk is low today — but the config invites regressions (e.g., switching to `credentials: true`). Since the UI is same-origin, `cors` can likely be removed entirely (also satisfies the minimal-deps constraint).
 
-### M7 — Dockerfile healthcheck still uses `localhost`
+### M7 — Dockerfile healthcheck still uses `localhost` — **FIXED** (`3718289`)
 The compose healthcheck was fixed to `127.0.0.1` (per CLAUDE.md), but the Dockerfile `HEALTHCHECK` — explicitly kept as the fallback — still uses `http://localhost:3000`, which resolves to `::1` first in Alpine while the server listens on IPv4 only. The fallback will report unhealthy exactly when it's needed. One-word fix.
 
 ### M8 — Container runs as root
