@@ -11,7 +11,6 @@ const {
   getAccessTokenForUser,
   syncPlaylistForLink,
   propagateRemoveToAllUsers,
-  journalizeRemoval,
 } = require('../poller');
 
 const router = Router();
