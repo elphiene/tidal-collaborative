@@ -196,6 +196,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('force-poll-btn').addEventListener('click', () => {
     handleForcePoll(document.getElementById('force-poll-btn'));
   });
+  document.getElementById('api-key-generate-btn').addEventListener('click', handleGenerateApiKey);
+  document.getElementById('api-key-copy-btn').addEventListener('click', handleCopyApiKey);
 
   // Journal controls (always in DOM)
   document.getElementById('journal-filter-action').addEventListener('change', () => {
@@ -2188,7 +2190,63 @@ async function fetchAdminSettings() {
     const data = await res.json();
     state.adminSettings = { ...state.adminSettings, ...data };
     renderAdminSettings();
+    fetchApiKeyStatus();
   } catch { /* silent — not admin-authed */ }
+}
+
+async function fetchApiKeyStatus() {
+  const statusEl = document.getElementById('api-key-status');
+  const btn      = document.getElementById('api-key-generate-btn');
+  try {
+    const res = await apiFetch(`${BASE_URL}/api/admin/api-key`);
+    if (!res.ok) return;
+    const { set, source } = await res.json();
+    if (source === 'env') {
+      statusEl.textContent = 'Set via API_KEY env var — rotate it there, not here';
+      btn.disabled = true;
+    } else if (set) {
+      statusEl.textContent = 'A key is set. Generating again rotates it (old key stops working).';
+      btn.textContent = 'Rotate';
+    } else {
+      statusEl.textContent = 'Read-only key for external apps to fetch playlist data';
+      btn.textContent = 'Generate';
+    }
+  } catch { /* silent — not admin-authed */ }
+}
+
+async function handleGenerateApiKey() {
+  const btn = document.getElementById('api-key-generate-btn');
+  const rotating = btn.textContent === 'Rotate';
+  if (rotating && !confirm('Rotate the API key? The current key will stop working immediately.')) return;
+  btn.disabled = true;
+  const prev = btn.textContent;
+  btn.textContent = 'Working…';
+  try {
+    const res = await apiFetch(`${BASE_URL}/api/admin/api-key`, { method: 'POST' });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+    document.getElementById('api-key-value').value = data.key;
+    document.getElementById('api-key-reveal-row').hidden = false;
+    toast('API key generated — copy it now', 'success');
+    fetchApiKeyStatus();
+  } catch (err) {
+    toast(`Failed: ${err.message}`, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = prev;   // fetchApiKeyStatus() corrects the label to Generate/Rotate
+  }
+}
+
+async function handleCopyApiKey() {
+  const input = document.getElementById('api-key-value');
+  try {
+    await navigator.clipboard.writeText(input.value);
+    toast('Copied to clipboard', 'success');
+  } catch {
+    input.select();
+    document.execCommand('copy');
+    toast('Copied', 'success');
+  }
 }
 
 function renderAdminSettings() {

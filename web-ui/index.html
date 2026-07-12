@@ -225,6 +225,25 @@
             <button class="btn btn-secondary btn-sm" id="force-poll-btn">Force Poll Now</button>
           </div>
         </div>
+        <div class="settings-row">
+          <div class="settings-label">
+            API key
+            <span class="settings-hint" id="api-key-status">Read-only key for external apps to fetch playlist data</span>
+          </div>
+          <div class="settings-control">
+            <button class="btn btn-secondary btn-sm" id="api-key-generate-btn">Generate</button>
+          </div>
+        </div>
+        <div class="settings-row" id="api-key-reveal-row" hidden>
+          <div class="settings-label">
+            New key — copy it now
+            <span class="settings-hint">This is shown once. It isn't stored in a recoverable form; generate again to rotate.</span>
+          </div>
+          <div class="settings-control">
+            <input class="form-input" id="api-key-value" type="text" readonly style="min-width:0;flex:1;font-family:monospace;font-size:12px" />
+            <button class="btn btn-secondary btn-sm" id="api-key-copy-btn">Copy</button>
+          </div>
+        </div>
       </div>
     </section>
 

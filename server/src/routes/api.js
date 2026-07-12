@@ -25,6 +25,49 @@ function getBroadcast() {
 }
 
 // ---------------------------------------------------------------------------
+// API-key auth (read-only) — lets a headless client (e.g. Cherry's car app)
+// read collaboration data without a browser session. A valid key is treated
+// like an admin *for reads only*: every non-GET is rejected by the gate below,
+// and `req.readAuth` is honoured only by the global-read endpoints. Per-user
+// endpoints (/me, /links, /tidal/playlists, /users/all) still 401 — the key is
+// nobody's session. Key source: API_KEY env var → api_key_hash setting (set via
+// the admin UI). See docs/API.md.
+// ---------------------------------------------------------------------------
+
+// True if the request may read global collaboration data.
+function canRead(req) {
+  return !!(req.session.userId || req.session.adminAuthed || req.readAuth);
+}
+
+function apiKeyValid(key) {
+  const envKey = process.env.API_KEY;
+  if (envKey) {
+    const a = Buffer.from(key);
+    const b = Buffer.from(envKey);
+    return a.length === b.length && nodeCrypto.timingSafeEqual(a, b);
+  }
+  const stored = db.getSetting('api_key_hash');
+  return stored ? verifyPinHash(key, stored) : false;
+}
+
+// Gate: only engages when a Bearer token is present, so cookie/session traffic
+// is untouched. Invalid key → 401; valid key on a write → 403; valid key on a
+// GET → flagged read-only and passed through to the normal handlers.
+router.use((req, res, next) => {
+  const auth = req.headers.authorization;
+  if (!auth || !auth.startsWith('Bearer ')) return next();
+  const key = auth.slice(7).trim();
+  if (!key || !apiKeyValid(key)) {
+    return res.status(401).json({ error: 'Invalid API key' });
+  }
+  if (req.method !== 'GET') {
+    return res.status(403).json({ error: 'API key is read-only' });
+  }
+  req.readAuth = true;
+  next();
+});
+
+// ---------------------------------------------------------------------------
 // Health
 // ---------------------------------------------------------------------------
 
@@ -196,6 +239,37 @@ router.patch('/admin/settings', (req, res) => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// Admin — read-only API key (for headless clients; see docs/API.md)
+// ---------------------------------------------------------------------------
+
+// GET /api/admin/api-key — whether a key is set, and whether it's pinned by env.
+// Never returns the key itself. An env-var key can't be rotated from the UI.
+router.get('/admin/api-key', (req, res) => {
+  if (!req.session.adminAuthed) return res.status(403).json({ error: 'Admin auth required' });
+  res.json({
+    set:    !!process.env.API_KEY || !!db.getSetting('api_key_hash'),
+    source: process.env.API_KEY ? 'env' : (db.getSetting('api_key_hash') ? 'db' : null),
+  });
+});
+
+// POST /api/admin/api-key — generate (or rotate) the key. Returns the plaintext
+// ONCE; only its hash is stored, so a lost key means rotating, not recovering.
+router.post('/admin/api-key', (req, res) => {
+  if (!req.session.adminAuthed) return res.status(403).json({ error: 'Admin auth required' });
+  if (process.env.API_KEY) {
+    return res.status(409).json({ error: 'API key is pinned by the API_KEY env var — rotate it there' });
+  }
+  try {
+    const key = nodeCrypto.randomBytes(32).toString('hex');
+    db.setSetting('api_key_hash', hashPin(key));
+    res.json({ key });
+  } catch (err) {
+    console.error('[api] POST /admin/api-key', err.message);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // POST /api/admin/force-poll — trigger an immediate poll cycle for all users
 router.post('/admin/force-poll', (req, res) => {
   if (!req.session.adminAuthed) return res.status(403).json({ error: 'Admin auth required' });
@@ -222,7 +296,7 @@ router.post('/admin/users/:id/reset-sync', (req, res) => {
 
 // GET /api/sync/status — per-user sync health (usable by signed-in users)
 router.get('/sync/status', (req, res) => {
-  if (!req.session.userId && !req.session.adminAuthed) {
+  if (!canRead(req)) {
     return res.status(401).json({ error: 'Not signed in' });
   }
   try {
@@ -262,7 +336,7 @@ router.get('/tidal/playlists', async (req, res) => {
 
 router.get('/shared-playlists', (req, res) => {
   try {
-    const userId = req.session.adminAuthed ? null : (req.session.userId ?? null);
+    const userId = (req.session.adminAuthed || req.readAuth) ? null : (req.session.userId ?? null);
     res.json(db.getSharedPlaylists(userId));
   } catch (err) {
     console.error('[api] GET /shared-playlists', err.message);
@@ -353,7 +427,7 @@ router.delete('/shared-playlists/:id', (req, res) => {
 });
 
 router.get('/shared-playlists/:id/tracks', (req, res) => {
-  if (!req.session.userId && !req.session.adminAuthed) {
+  if (!canRead(req)) {
     return res.status(401).json({ error: 'Not signed in' });
   }
   const id = parseInt(req.params.id, 10);
@@ -660,7 +734,7 @@ router.post('/links/:id/sync', async (req, res) => {
 });
 
 router.get('/shared-playlists/:id/linked-users', (req, res) => {
-  if (!req.session.userId && !req.session.adminAuthed) {
+  if (!canRead(req)) {
     return res.status(401).json({ error: 'Not signed in' });
   }
   const id = parseInt(req.params.id, 10);
@@ -707,7 +781,7 @@ router.get('/setup/redirect-uri', (req, res) => {
 // ---------------------------------------------------------------------------
 
 router.get('/users', (req, res) => {
-  if (!req.session.userId && !req.session.adminAuthed) {
+  if (!canRead(req)) {
     return res.status(401).json({ error: 'Not signed in' });
   }
   try {
@@ -737,7 +811,7 @@ router.get('/users/all', (req, res) => {
 // ---------------------------------------------------------------------------
 
 router.get('/journal', (req, res) => {
-  if (!req.session.adminAuthed) return res.status(403).json({ error: 'Admin auth required' });
+  if (!req.session.adminAuthed && !req.readAuth) return res.status(403).json({ error: 'Admin auth required' });
 
   const sharedPlaylistId = req.query.playlist_id ? parseInt(req.query.playlist_id, 10) : null;
   const action           = ['added', 'removed'].includes(req.query.action) ? req.query.action : null;
@@ -764,7 +838,7 @@ router.get('/journal', (req, res) => {
 });
 
 router.get('/journal/stats', (req, res) => {
-  if (!req.session.adminAuthed) return res.status(403).json({ error: 'Admin auth required' });
+  if (!req.session.adminAuthed && !req.readAuth) return res.status(403).json({ error: 'Admin auth required' });
   try {
     res.json(db.getJournalStats());
   } catch (err) {
