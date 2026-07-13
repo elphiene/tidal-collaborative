@@ -152,7 +152,14 @@ router.get('/me', (req, res) => {
     req.session.destroy(() => {});
     return res.status(401).json({ error: 'Not signed in' });
   }
-  res.json({ userId: user.user_id, displayName: user.display_name });
+  // sync_status lets the client show a "reconnect Tidal" banner when the
+  // user's own token has gone dead (token_revoked / error).
+  res.json({
+    userId:      user.user_id,
+    displayName: user.display_name,
+    syncStatus:  user.sync_status ?? 'ok',
+    syncError:   user.sync_error_msg ?? null,
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -327,6 +334,32 @@ router.get('/tidal/playlists', async (req, res) => {
       return res.status(401).json({ error: 'Tidal session expired — please sign out and sign in again' });
     }
     res.status(500).json({ error: 'Failed to fetch playlists from Tidal' });
+  }
+});
+
+// POST /api/tidal/playlists — create a fresh, empty playlist in the user's
+// Tidal account so they don't have to make one manually first. Returns
+// { id, name } which the create-playlist flow then links to a shared playlist.
+router.post('/tidal/playlists', async (req, res) => {
+  if (!req.session.userId) return res.status(401).json({ error: 'Not signed in' });
+
+  const name        = req.body?.name?.trim();
+  const description  = req.body?.description?.trim() || '';
+  if (!name) return res.status(400).json({ error: '"name" is required' });
+
+  try {
+    const user = db.getUser(req.session.userId);
+    if (!user) return res.status(401).json({ error: 'Not signed in' });
+
+    const accessToken = await getAccessTokenForUser(user);
+    const playlist    = await tidal.tidalCreatePlaylist(name, description, accessToken);
+    res.status(201).json(playlist); // { id, name }
+  } catch (err) {
+    console.error('[api] POST /tidal/playlists:', err.message);
+    if (err.message === 'TIDAL_SESSION_DEAD') {
+      return res.status(401).json({ error: 'Tidal session expired — please sign out and sign in again' });
+    }
+    res.status(500).json({ error: 'Failed to create playlist in Tidal' });
   }
 });
 

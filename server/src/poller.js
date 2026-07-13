@@ -516,7 +516,8 @@ async function initNewLink(link) {
 }
 
 /**
- * Full bidirectional sync for a link (used by admin force-sync endpoint).
+ * Full bidirectional sync for a link (used by the owner's "Sync now" and the
+ * POST /api/links/:id/sync endpoint — ownership-gated, not admin-only).
  * - Tidal-only tracks → merged into server DB + propagated to other users
  * - Server-only tracks → added to Tidal
  * - Tidal duplicates → excess copies removed

@@ -61,7 +61,10 @@ async function tidalFetch(path, accessToken, options = {}) {
     }
   }
 
-  if (res.status === 204 || res.status === 202 || res.status === 201) return null;
+  if (res.status === 204 || res.status === 202) return null;
+  // 201 (Created) normally has no useful body here, but creation endpoints
+  // (e.g. POST /playlists) return the new resource — opt in with wantBody.
+  if (res.status === 201 && !options.wantBody) return null;
 
   if (!res.ok) {
     let body = '';
@@ -246,6 +249,31 @@ async function tidalGetPlaylistTrackIds(playlistId, accessToken, startCursor = n
 }
 
 /**
+ * Create a new, empty playlist in the user's Tidal account.
+ * Returns { id, name } of the created playlist (needs wantBody so tidalFetch
+ * parses the 201 response instead of returning null).
+ */
+async function tidalCreatePlaylist(name, description, accessToken) {
+  const data = await tidalFetch('/playlists', accessToken, {
+    method:   'POST',
+    wantBody: true,
+    body:     JSON.stringify({
+      data: {
+        type: 'playlists',
+        attributes: {
+          name,
+          description: description || '',
+          accessType:  'UNLISTED',
+        },
+      },
+    }),
+  });
+  const id = data?.data?.id;
+  if (!id) throw new Error('Tidal create playlist: no id in response');
+  return { id: String(id), name: data?.data?.attributes?.name ?? name };
+}
+
+/**
  * Add a track to a playlist.
  */
 async function tidalAddTrack(playlistId, trackId, accessToken) {
@@ -401,6 +429,7 @@ module.exports = {
   tidalGetPlaylistTrackIds,
   tidalGetPlaylistTrackList,
   tidalGetPlaylistItemMap,
+  tidalCreatePlaylist,
   tidalAddTrack,
   tidalRemoveTrack,
   tidalGetTrackInfo,
