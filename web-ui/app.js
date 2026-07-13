@@ -18,7 +18,7 @@ const state = {
   displayName:  null,
   signedIn:     false,
 
-  // Current view: 'signed-out' | 'my-playlists' | 'discover' | 'users' | 'admin'
+  // Current view: 'signed-out' | 'playlists' | 'discover' | 'users' | 'activity' | 'admin'
   view: 'signed-out',
 
   // Admin data
@@ -133,6 +133,16 @@ document.addEventListener('DOMContentLoaded', async () => {
     toast('Refreshed', 'info');
   });
   document.getElementById('refresh-discover-btn').addEventListener('click', fetchDiscover);
+  document.getElementById('open-discover-btn').addEventListener('click', () => switchView('discover'));
+  document.getElementById('discover-back-btn').addEventListener('click', () => switchView('playlists'));
+  document.getElementById('hiw-dismiss').addEventListener('click', () => {
+    localStorage.setItem('hiw_dismissed', '1');
+    document.getElementById('hiw-strip').hidden = true;
+  });
+  // Activity filters (user-facing journal)
+  document.getElementById('activity-filter-action').addEventListener('change', fetchUserActivity);
+  document.getElementById('activity-filter-playlist').addEventListener('change', fetchUserActivity);
+  document.getElementById('user-activity-more-btn').addEventListener('click', () => fetchUserActivity(true));
 
   // Navigation tabs
   document.querySelectorAll('.nav-tab').forEach((btn) => {
@@ -149,6 +159,15 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
   document.querySelectorAll('input[name="create-visibility"]').forEach((radio) => {
     radio.addEventListener('change', (e) => { state.createVisibility = e.target.value; });
+  });
+  document.querySelectorAll('input[name="create-source"]').forEach((radio) => {
+    radio.addEventListener('change', (e) => {
+      state.createSource = e.target.value;
+      // "fresh" creates straight from step 1; "existing" goes to the picker step.
+      if (state.createStep === 1) {
+        document.getElementById('create-next-btn').textContent = e.target.value === 'fresh' ? 'Create' : 'Next';
+      }
+    });
   });
   document.getElementById('create-next-btn').addEventListener('click', handleCreateNext);
   document.getElementById('create-back-btn').addEventListener('click', handleCreateBack);
@@ -422,6 +441,7 @@ async function checkAuth() {
     const data = await res.json();
     state.userId      = data.userId;
     state.displayName = data.displayName;
+    state.myStatus    = data.syncStatus || 'ok';
     state.signedIn    = true;
     showSignedIn();
   } catch (err) {
@@ -474,15 +494,15 @@ async function handleSignOut() {
 // ---------------------------------------------------------------------------
 
 function showSignedOut() {
-  document.getElementById('signed-out-view').hidden   = false;
-  document.getElementById('my-playlists-view').hidden = true;
-  document.getElementById('discover-view').hidden     = true;
-  document.getElementById('users-view').hidden        = true;
-  document.getElementById('admin-view').hidden        = true;
-  document.getElementById('nav-tabs').hidden          = true;
-  document.getElementById('tab-discover').hidden      = true;
-  document.getElementById('user-display').hidden      = true;
-  document.getElementById('signout-btn').hidden       = true;
+  document.getElementById('signed-out-view').hidden = false;
+  document.getElementById('playlists-view').hidden  = true;
+  document.getElementById('discover-view').hidden   = true;
+  document.getElementById('users-view').hidden      = true;
+  document.getElementById('activity-view').hidden   = true;
+  document.getElementById('admin-view').hidden      = true;
+  document.getElementById('nav-tabs').hidden        = true;
+  document.getElementById('user-display').hidden    = true;
+  document.getElementById('signout-btn').hidden     = true;
   clearInterval(state.usersViewTimer);
   state.usersViewTimer = null;
   hideSyncBanner();
@@ -493,7 +513,6 @@ function showSignedOut() {
 function showSignedIn() {
   document.getElementById('signed-out-view').hidden = true;
   document.getElementById('nav-tabs').hidden        = false;
-  document.getElementById('tab-discover').hidden    = false;
   const userDisplay = document.getElementById('user-display');
   userDisplay.textContent = state.displayName ?? state.userId;
   userDisplay.hidden      = false;
@@ -506,7 +525,7 @@ function showSignedIn() {
     setTimeout(() => openInviteLinkModal(pendingInvite), 400);
   }
 
-  switchView('my-playlists');
+  switchView('playlists');
   connectWebSocket();
   state.pollTimer        = setInterval(refreshAdmin, POLL_MS);
   state.sessionCheckTimer = setInterval(() => apiFetch(`${BASE_URL}/api/me`), 2 * 60 * 1000);
@@ -527,22 +546,27 @@ async function switchView(viewName) {
 
   state.view = viewName;
 
+  // Discover is a sub-page of Playlists — keep the Playlists tab lit there.
+  const activeTab = viewName === 'discover' ? 'playlists' : viewName;
   document.querySelectorAll('.nav-tab').forEach((btn) => {
-    btn.classList.toggle('nav-tab-active', btn.dataset.view === viewName);
+    btn.classList.toggle('nav-tab-active', btn.dataset.view === activeTab);
   });
 
-  document.getElementById('my-playlists-view').hidden = viewName !== 'my-playlists';
-  document.getElementById('discover-view').hidden     = viewName !== 'discover';
-  document.getElementById('users-view').hidden        = viewName !== 'users';
-  document.getElementById('admin-view').hidden        = viewName !== 'admin';
+  document.getElementById('playlists-view').hidden = viewName !== 'playlists';
+  document.getElementById('discover-view').hidden  = viewName !== 'discover';
+  document.getElementById('users-view').hidden     = viewName !== 'users';
+  document.getElementById('activity-view').hidden  = viewName !== 'activity';
+  document.getElementById('admin-view').hidden     = viewName !== 'admin';
 
-  if (viewName === 'my-playlists') {
+  if (viewName === 'playlists') {
     fetchMyPlaylists();
   } else if (viewName === 'discover') {
     fetchDiscover();
   } else if (viewName === 'users') {
     fetchAllUsers();
     state.usersViewTimer = setInterval(fetchAllUsers, 30_000);
+  } else if (viewName === 'activity') {
+    fetchUserActivity();
   } else if (viewName === 'admin') {
     refreshAdmin();
   }
@@ -653,10 +677,11 @@ async function handlePinSubmit() {
     document.querySelectorAll('.nav-tab').forEach((btn) => {
       btn.classList.toggle('nav-tab-active', btn.dataset.view === 'admin');
     });
-    document.getElementById('my-playlists-view').hidden = true;
-    document.getElementById('discover-view').hidden     = true;
-    document.getElementById('users-view').hidden        = true;
-    document.getElementById('admin-view').hidden        = false;
+    document.getElementById('playlists-view').hidden = true;
+    document.getElementById('discover-view').hidden  = true;
+    document.getElementById('users-view').hidden     = true;
+    document.getElementById('activity-view').hidden  = true;
+    document.getElementById('admin-view').hidden     = false;
     refreshAdmin();
   } catch (err) {
     errEl.textContent = 'Network error — try again';
@@ -671,6 +696,7 @@ async function handlePinSubmit() {
 // ---------------------------------------------------------------------------
 
 async function fetchMyPlaylists() {
+  const hub = document.getElementById('playlists-hub');
   try {
     const [linksRes, playlistsRes] = await Promise.all([
       apiFetch(`${BASE_URL}/api/links`),
@@ -686,153 +712,139 @@ async function fetchMyPlaylists() {
     state.ownedLinks  = links.filter((l) => l.playlist_created_by === state.userId);
     state.joinedLinks = links.filter((l) => l.playlist_created_by !== state.userId);
 
-    // Owned playlists with no link yet (edge case)
+    // Counts (tracks / members) come from the shared-playlists payload.
+    const counts = {};
+    playlists.forEach((p) => { counts[p.id] = p; });
+
+    // Owned playlists with no Tidal link yet (edge case)
     const linkedSharedIds = new Set(links.map((l) => l.shared_playlist_id));
     const unlinkedOwned   = playlists.filter(
       (p) => p.created_by === state.userId && !linkedSharedIds.has(p.id),
     );
 
-    renderOwnedPlaylists(state.ownedLinks, unlinkedOwned);
-    renderJoinedPlaylists(state.joinedLinks);
+    renderPlaylistsHub(state.ownedLinks, state.joinedLinks, unlinkedOwned, counts);
   } catch (err) {
     console.error('[app] fetchMyPlaylists:', err.message);
-    const errHtml = `<div class="empty-state"><p class="empty-title">Failed to load playlists</p><p class="empty-sub">${escHtml(err.message)}</p></div>`;
-    document.getElementById('owned-playlists-list').innerHTML  = errHtml;
-    document.getElementById('joined-playlists-list').innerHTML = errHtml;
+    hub.innerHTML = `<div class="empty-state"><p class="empty-title">Failed to load playlists</p><p class="empty-sub">${escHtml(err.message)}</p></div>`;
   }
 }
 
-function renderOwnedPlaylists(links, unlinked) {
-  const el = document.getElementById('owned-playlists-list');
-
-  if (links.length === 0 && unlinked.length === 0) {
-    el.innerHTML = `
-      <div class="empty-state">
-        <div class="empty-icon">🎵</div>
-        <p class="empty-title">No playlists yet</p>
-        <p class="empty-sub">Click <strong>New Playlist</strong> to create your first one.</p>
-      </div>`;
-    return;
-  }
-
-  const linkedCards = links.map((link) => {
-    const isPrivate = !link.playlist_is_public;
-    const visBadge  = isPrivate
-      ? '<span class="badge-private">🔒 Private</span>'
-      : '<span class="badge-public">🌍 Public</span>';
-    const visBtn = isPrivate
-      ? `<button class="btn btn-ghost btn-sm btn-xs" data-toggle-vis="${link.shared_playlist_id}" data-is-public="0">Make Public</button>`
-      : `<button class="btn btn-ghost btn-sm btn-xs" data-toggle-vis="${link.shared_playlist_id}" data-is-public="1">Make Private</button>`;
-    const inviteBtn = isPrivate
-      ? `<button class="btn btn-ghost btn-sm btn-xs" data-invites="${link.shared_playlist_id}" data-invites-name="${escHtml(link.shared_playlist_name)}">Invite Link</button>`
-      : '';
-
-    return `
-      <div class="link-card">
-        <div class="link-card-body">
-          <div class="link-arrow">
-            <span class="link-name shared-name">${escHtml(link.shared_playlist_name)}</span>
-            ${visBadge}
-          </div>
-          <div class="link-arrow">
-            <span class="link-name tidal-name">${escHtml(link.tidal_playlist_name || link.tidal_playlist_id)}</span>
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
-            <span class="link-name" style="color:var(--text-muted)">syncing</span>
-          </div>
-          <p class="link-meta">Linked ${formatDate(link.created_at)}</p>
-        </div>
-        <div class="link-card-actions" style="flex-wrap:wrap;gap:0.35rem">
-          <button class="btn btn-secondary btn-sm btn-xs" data-sync="${link.id}">Sync</button>
-          ${inviteBtn}
-          ${visBtn}
-          <button class="btn btn-danger btn-sm btn-xs" data-delete-pl="${link.shared_playlist_id}" data-delete-pl-name="${escHtml(link.shared_playlist_name)}" data-armed="false">Delete</button>
-        </div>
-      </div>`;
-  });
-
-  const unlinkedCards = unlinked.map((pl) => {
-    const isPrivate = !pl.is_public;
-    const visBadge  = isPrivate
-      ? '<span class="badge-private">🔒 Private</span>'
-      : '<span class="badge-public">🌍 Public</span>';
-    const visBtn = isPrivate
-      ? `<button class="btn btn-ghost btn-sm btn-xs" data-toggle-vis="${pl.id}" data-is-public="0">Make Public</button>`
-      : `<button class="btn btn-ghost btn-sm btn-xs" data-toggle-vis="${pl.id}" data-is-public="1">Make Private</button>`;
-    const inviteBtn = isPrivate
-      ? `<button class="btn btn-ghost btn-sm btn-xs" data-invites="${pl.id}" data-invites-name="${escHtml(pl.name)}">Invite Link</button>`
-      : '';
-    return `
-      <div class="link-card">
-        <div class="link-card-body">
-          <div class="link-arrow">
-            <span class="link-name shared-name">${escHtml(pl.name)}</span>
-            ${visBadge}
-          </div>
-          <p class="link-meta">Not linked to a Tidal playlist · Created ${formatDate(pl.created_at)}</p>
-        </div>
-        <div class="link-card-actions" style="flex-wrap:wrap;gap:0.35rem">
-          ${inviteBtn}
-          ${visBtn}
-          <button class="btn btn-danger btn-sm btn-xs" data-delete-pl="${pl.id}" data-delete-pl-name="${escHtml(pl.name)}" data-armed="false">Delete</button>
-        </div>
-      </div>`;
-  });
-
-  el.innerHTML = [...linkedCards, ...unlinkedCards].join('');
-
-  el.querySelectorAll('[data-sync]').forEach((btn) => {
-    btn.addEventListener('click', () => handleSync(parseInt(btn.dataset.sync, 10), btn));
-  });
-  el.querySelectorAll('[data-invites]').forEach((btn) => {
-    btn.addEventListener('click', () =>
-      openInvitesModal(parseInt(btn.dataset.invites, 10), btn.dataset.invitesName));
-  });
-  el.querySelectorAll('[data-toggle-vis]').forEach((btn) => {
-    btn.addEventListener('click', () =>
-      handleToggleVisibility(parseInt(btn.dataset.toggleVis, 10), btn.dataset.isPublic === '1', btn));
-  });
-  el.querySelectorAll('[data-delete-pl]').forEach((btn) => {
-    btn.addEventListener('click', () =>
-      handleDeletePlaylist(parseInt(btn.dataset.deletePl, 10), btn.dataset.deletePlName, btn));
-  });
+// A teal "Synced" pill, or an amber warning derived from the user's own sync state.
+function syncPillHTML() {
+  const s = state.myStatus || 'ok';
+  if (s === 'ok') return '<span class="pl-sync"><span class="dot"></span>Synced</span>';
+  const label = s === 'rate_limited' ? 'Rate-limited'
+    : s === 'token_revoked' ? 'Reconnect needed'
+    : 'Sync error';
+  return `<span class="pl-sync warn"><span class="dot"></span>${label}</span>`;
 }
 
-function renderJoinedPlaylists(links) {
-  const el = document.getElementById('joined-playlists-list');
+function plCardHTML(o) {
+  // o: { role, spId, name, isPublic, linkId, tracks, members, unlinked }
+  const roleLabel = `${o.role} · ${o.isPublic ? 'Public' : 'Private'}`;
+  const stats = `
+    <div class="pl-stats">
+      <div class="pl-stat"><div class="n">${o.unlinked ? '—' : o.tracks}</div><div class="l">tracks</div></div>
+      <div class="pl-stat"><div class="n">${o.members}</div><div class="l">member${o.members === 1 ? '' : 's'}</div></div>
+    </div>`;
 
-  if (links.length === 0) {
-    el.innerHTML = `
-      <div class="empty-state">
-        <p class="empty-title">No joined playlists</p>
-        <p class="empty-sub">Browse the <strong>Discover</strong> tab or use an invite link to join a playlist.</p>
-      </div>`;
+  const actions = [];
+  actions.push(`<button class="btn btn-ghost btn-sm" data-view-tracks="${o.spId}">View tracks</button>`);
+  if (o.role === 'Owner') {
+    if (!o.isPublic) actions.push(`<button class="btn btn-ghost btn-sm" data-invites="${o.spId}" data-invites-name="${escHtml(o.name)}">Invite</button>`);
+    if (o.linkId) actions.push(`<button class="btn btn-ghost btn-sm" data-sync="${o.linkId}">Sync now</button>`);
+    actions.push(`<button class="btn btn-ghost btn-sm" data-toggle-vis="${o.spId}" data-is-public="${o.isPublic ? 1 : 0}">${o.isPublic ? 'Make Private' : 'Make Public'}</button>`);
+    actions.push(`<button class="btn btn-danger btn-sm" data-delete-pl="${o.spId}" data-delete-pl-name="${escHtml(o.name)}" data-armed="false">Delete</button>`);
+  } else {
+    if (o.linkId) actions.push(`<button class="btn btn-ghost btn-sm" data-sync="${o.linkId}">Sync now</button>`);
+    actions.push(`<button class="btn btn-danger btn-sm" data-unlink="${o.linkId}" data-armed="false">Leave</button>`);
+  }
+
+  const sub = o.unlinked ? '<div class="pl-activity">Not linked to a Tidal playlist yet</div>' : '';
+
+  return `
+    <div class="pl-card">
+      <div class="pl-card-top">
+        <div><div class="pl-name">${escHtml(o.name)}</div><div class="pl-role">${roleLabel}</div></div>
+        ${o.unlinked ? '' : syncPillHTML()}
+      </div>
+      ${stats}
+      ${sub}
+      <div class="pl-foot">${actions.join('')}</div>
+    </div>`;
+}
+
+function renderPlaylistsHub(ownedLinks, joinedLinks, unlinkedOwned, counts) {
+  const hub = document.getElementById('playlists-hub');
+  const sub = document.getElementById('playlists-sub');
+  const hiw = document.getElementById('hiw-strip');
+  const total = ownedLinks.length + joinedLinks.length + unlinkedOwned.length;
+
+  if (total === 0) {
+    hiw.hidden = true;
+    sub.textContent = 'Nothing here yet — create your first one below.';
+    hub.innerHTML = welcomeHTML();
+    document.getElementById('welcome-create')?.addEventListener('click', openCreateModal);
+    document.getElementById('welcome-discover')?.addEventListener('click', () => switchView('discover'));
     return;
   }
 
-  el.innerHTML = links.map((link) => `
-    <div class="link-card">
-      <div class="link-card-body">
-        <div class="link-arrow">
-          <span class="link-name tidal-name">${escHtml(link.tidal_playlist_name || link.tidal_playlist_id)}</span>
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-            <path d="M5 12h14M12 5l7 7-7 7"/>
-          </svg>
-          <span class="link-name shared-name">${escHtml(link.shared_playlist_name)}</span>
-        </div>
-        <p class="link-meta">Linked ${formatDate(link.created_at)}</p>
-      </div>
-      <div class="link-card-actions">
-        <button class="btn btn-secondary btn-sm" data-sync="${link.id}">Sync</button>
-        <button class="btn btn-danger btn-sm" data-unlink="${link.id}" data-armed="false">Unlink</button>
-      </div>
-    </div>`).join('');
+  hiw.hidden = localStorage.getItem('hiw_dismissed') === '1';
+  sub.textContent = `${total} playlist${total === 1 ? '' : 's'}`;
 
-  el.querySelectorAll('[data-sync]').forEach((btn) => {
-    btn.addEventListener('click', () => handleSync(parseInt(btn.dataset.sync, 10), btn));
-  });
-  el.querySelectorAll('[data-unlink]').forEach((btn) => {
-    btn.addEventListener('click', () => handleUnlink(parseInt(btn.dataset.unlink, 10), btn));
-  });
+  const cards = [];
+  ownedLinks.forEach((l) => cards.push(plCardHTML({
+    role: 'Owner', spId: l.shared_playlist_id, name: l.shared_playlist_name,
+    isPublic: !!l.playlist_is_public, linkId: l.id,
+    tracks: counts[l.shared_playlist_id]?.track_count ?? 0,
+    members: counts[l.shared_playlist_id]?.user_count ?? 1,
+  })));
+  unlinkedOwned.forEach((p) => cards.push(plCardHTML({
+    role: 'Owner', spId: p.id, name: p.name, isPublic: !!p.is_public, linkId: null,
+    tracks: p.track_count ?? 0, members: p.user_count ?? 1, unlinked: true,
+  })));
+  joinedLinks.forEach((l) => cards.push(plCardHTML({
+    role: 'Joined', spId: l.shared_playlist_id, name: l.shared_playlist_name,
+    isPublic: !!l.playlist_is_public, linkId: l.id,
+    tracks: counts[l.shared_playlist_id]?.track_count ?? 0,
+    members: counts[l.shared_playlist_id]?.user_count ?? 1,
+  })));
+
+  hub.innerHTML = cards.join('');
+
+  hub.querySelectorAll('[data-view-tracks]').forEach((b) =>
+    b.addEventListener('click', () => openViewModal(Number(b.dataset.viewTracks))));
+  hub.querySelectorAll('[data-sync]').forEach((b) =>
+    b.addEventListener('click', () => handleSync(parseInt(b.dataset.sync, 10), b)));
+  hub.querySelectorAll('[data-invites]').forEach((b) =>
+    b.addEventListener('click', () => openInvitesModal(parseInt(b.dataset.invites, 10), b.dataset.invitesName)));
+  hub.querySelectorAll('[data-toggle-vis]').forEach((b) =>
+    b.addEventListener('click', () => handleToggleVisibility(parseInt(b.dataset.toggleVis, 10), b.dataset.isPublic === '1', b)));
+  hub.querySelectorAll('[data-delete-pl]').forEach((b) =>
+    b.addEventListener('click', () => handleDeletePlaylist(parseInt(b.dataset.deletePl, 10), b.dataset.deletePlName, b)));
+  hub.querySelectorAll('[data-unlink]').forEach((b) =>
+    b.addEventListener('click', () => handleUnlink(parseInt(b.dataset.unlink, 10), b)));
+}
+
+function welcomeHTML() {
+  return `
+    <div class="welcome">
+      <h2>Welcome to Tidal Collaborative 👋</h2>
+      <p class="lead">Keep a playlist perfectly in sync with friends — every add and remove shows up for everyone, automatically.</p>
+      <div class="steps">
+        <div class="step"><div class="num">1</div><h3>Make a Tidal playlist</h3><p>Create it in Tidal — or let us make a fresh empty one for you when you create a playlist below.</p></div>
+        <div class="step"><div class="num">2</div><h3>Create or join here</h3><p>Start a shared playlist, or join one a friend invited you to, then link your Tidal playlist to it.</p></div>
+        <div class="step"><div class="num">3</div><h3>Just add music</h3><p>From then on, every add or remove syncs to everyone automatically.</p></div>
+      </div>
+      <div class="welcome-callout">
+        <span class="wc-icon">🔀</span>
+        <span><b>Linking merges the two playlists.</b> Any songs already in your Tidal playlist get added to the shared one and pushed to everyone — and the shared playlist's songs get added to yours. Start with an empty Tidal playlist for a clean join.</span>
+      </div>
+      <div class="welcome-cta">
+        <button class="btn btn-primary" id="welcome-create">＋ Create your first playlist</button>
+        <button class="btn btn-secondary" id="welcome-discover">Browse public playlists</button>
+      </div>
+    </div>`;
 }
 
 async function handleUnlink(linkId, btn) {
@@ -1009,19 +1021,21 @@ function renderDiscover() {
 function openCreateModal() {
   state.createStep          = 1;
   state.createVisibility    = 'private';
+  state.createSource        = 'fresh';
   state.createSelectedTidal = null;
 
   // Reset step 1
   document.getElementById('create-name').value = '';
   document.getElementById('create-desc').value = '';
   document.querySelector('input[name="create-visibility"][value="private"]').checked = true;
+  document.querySelector('input[name="create-source"][value="fresh"]').checked = true;
   document.getElementById('create-error').textContent = '';
 
   // Show step 1, hide step 2
   document.getElementById('create-step-1').hidden = false;
   document.getElementById('create-step-2').hidden = true;
   document.getElementById('create-back-btn').hidden = true;
-  document.getElementById('create-next-btn').textContent = 'Next';
+  document.getElementById('create-next-btn').textContent = 'Create'; // fresh is default
   document.getElementById('create-next-btn').disabled = true;
 
   openModal('create-modal');
@@ -1029,16 +1043,23 @@ function openCreateModal() {
 }
 
 async function handleCreateNext() {
+  const name = document.getElementById('create-name').value.trim();
+
   if (state.createStep === 1) {
-    const name = document.getElementById('create-name').value.trim();
     if (!name) {
       document.getElementById('create-error').textContent = 'Name is required.';
       return;
     }
     document.getElementById('create-error').textContent = '';
-    state.createStep = 2;
 
-    document.getElementById('create-step-1').hidden = false; // keep visible briefly
+    // "fresh" — no picker needed; create an empty Tidal playlist and link it.
+    if (state.createSource === 'fresh') {
+      await submitCreate(name, null);
+      return;
+    }
+
+    // "existing" — advance to the Tidal playlist picker.
+    state.createStep = 2;
     document.getElementById('create-step-1').hidden = true;
     document.getElementById('create-step-2').hidden = false;
     document.getElementById('create-back-btn').hidden = false;
@@ -1046,46 +1067,63 @@ async function handleCreateNext() {
     document.getElementById('create-next-btn').disabled = true;
     state.createSelectedTidal = null;
 
-    // Load Tidal playlists
     await loadTidalPlaylistsInto('create-tidal-list', (pl) => {
       state.createSelectedTidal = pl;
       document.getElementById('create-next-btn').disabled = false;
     });
 
   } else {
-    // Step 2 — submit
+    // Step 2 — an existing Tidal playlist was chosen.
     if (!state.createSelectedTidal) return;
+    await submitCreate(name, state.createSelectedTidal);
+  }
+}
 
-    const btn  = document.getElementById('create-next-btn');
-    const name = document.getElementById('create-name').value.trim();
-    const desc = document.getElementById('create-desc').value.trim() || null;
+// Shared create submit. tidalPl null → create a fresh empty Tidal playlist first.
+async function submitCreate(name, tidalPl) {
+  const btn  = document.getElementById('create-next-btn');
+  const desc = document.getElementById('create-desc').value.trim() || null;
 
-    btn.disabled    = true;
-    btn.textContent = 'Creating…';
+  btn.disabled    = true;
+  btn.textContent = tidalPl ? 'Creating…' : 'Creating playlist…';
 
-    try {
-      const res = await apiFetch(`${BASE_URL}/api/shared-playlists`, {
+  try {
+    let tidalId = tidalPl?.id;
+    let tidalName = tidalPl?.name;
+
+    if (!tidalPl) {
+      const cr = await apiFetch(`${BASE_URL}/api/tidal/playlists`, {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({
-          name,
-          description:       desc,
-          isPublic:          state.createVisibility === 'public',
-          tidalPlaylistId:   state.createSelectedTidal.id,
-          tidalPlaylistName: state.createSelectedTidal.name,
-        }),
+        body:    JSON.stringify({ name, description: desc || '' }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
-
-      closeModal('create-modal');
-      toast(`"${name}" created`, 'success');
-      await fetchMyPlaylists();
-    } catch (err) {
-      toast(`Create failed: ${err.message}`, 'error');
-      btn.disabled    = false;
-      btn.textContent = 'Create';
+      const cd = await cr.json();
+      if (!cr.ok) throw new Error(cd.error ?? `HTTP ${cr.status}`);
+      tidalId   = cd.id;
+      tidalName = cd.name;
     }
+
+    const res = await apiFetch(`${BASE_URL}/api/shared-playlists`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({
+        name,
+        description:       desc,
+        isPublic:          state.createVisibility === 'public',
+        tidalPlaylistId:   tidalId,
+        tidalPlaylistName: tidalName,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+
+    closeModal('create-modal');
+    toast(`"${name}" created`, 'success');
+    await fetchMyPlaylists();
+  } catch (err) {
+    toast(`Create failed: ${err.message}`, 'error');
+    btn.disabled    = false;
+    btn.textContent = state.createStep === 2 ? 'Create' : (state.createSource === 'fresh' ? 'Create' : 'Next');
   }
 }
 
@@ -1094,7 +1132,8 @@ function handleCreateBack() {
   document.getElementById('create-step-1').hidden = false;
   document.getElementById('create-step-2').hidden = true;
   document.getElementById('create-back-btn').hidden = true;
-  document.getElementById('create-next-btn').textContent = 'Next';
+  document.getElementById('create-next-btn').textContent =
+    state.createSource === 'fresh' ? 'Create' : 'Next';
   document.getElementById('create-next-btn').disabled =
     !document.getElementById('create-name').value.trim();
 }
@@ -1602,6 +1641,116 @@ function renderJournal() {
 }
 
 // ---------------------------------------------------------------------------
+// User-facing Activity page (journal grouped by day)
+// ---------------------------------------------------------------------------
+
+function journalEntryHTML(e) {
+  const actionClass = e.action === 'added' ? 'journal-action-added' : 'journal-action-removed';
+  const verb        = e.action === 'added' ? 'added' : 'removed';
+  const prep        = e.action === 'added' ? 'to'    : 'from';
+  const track       = [e.track_artist, e.track_title].filter(Boolean).join(' – ') || '(unknown track)';
+  const playlist    = e.playlist_name ? escHtml(e.playlist_name) : '';
+  const who         = escHtml(e.display_name || e.user_id);
+  return `
+    <div class="journal-entry">
+      <span class="journal-sentence"><span class="journal-who">${who}</span> <span class="journal-verb ${actionClass}">${verb}</span> <span class="journal-track">${escHtml(track)}</span> ${prep} <span class="journal-playlist">${playlist}</span></span>
+      <span class="journal-time">${timeAgo(e.created_at)}</span>
+    </div>`;
+}
+
+function activityDayLabel(unixSec) {
+  const d   = new Date(unixSec * 1000);
+  const now = new Date();
+  const startOf = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const diff = Math.round((startOf(now) - startOf(d)) / 86400000);
+  if (diff === 0) return 'Today';
+  if (diff === 1) return 'Yesterday';
+  return d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+}
+
+function populateActivityPlaylistFilter() {
+  const sel = document.getElementById('activity-filter-playlist');
+  if (!sel) return;
+  const current = sel.value;
+  const seen = new Set();
+  const opts = [{ id: '', name: 'All playlists' }];
+  [...(state.ownedLinks || []), ...(state.joinedLinks || [])].forEach((l) => {
+    if (!seen.has(l.shared_playlist_id)) {
+      seen.add(l.shared_playlist_id);
+      opts.push({ id: l.shared_playlist_id, name: l.shared_playlist_name });
+    }
+  });
+  sel.innerHTML = opts.map((o) =>
+    `<option value="${o.id}"${String(o.id) === current ? ' selected' : ''}>${escHtml(o.name)}</option>`
+  ).join('');
+}
+
+async function fetchUserActivity(append = false) {
+  const list     = document.getElementById('user-activity-list');
+  const moreWrap = document.getElementById('user-activity-more');
+  const action     = document.getElementById('activity-filter-action')?.value   || '';
+  const playlistId = document.getElementById('activity-filter-playlist')?.value  || '';
+
+  if (!append) { state.userActivityOffset = 0; state.userActivity = []; }
+
+  const params = new URLSearchParams({ limit: 50, offset: state.userActivityOffset });
+  if (action)     params.set('action',      action);
+  if (playlistId) params.set('playlist_id', playlistId);
+
+  try {
+    const res = await apiFetch(`${BASE_URL}/api/journal?${params}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const entries = await res.json();
+
+    if (append) state.userActivity.push(...entries);
+    else { state.userActivity = entries; populateActivityPlaylistFilter(); }
+
+    state.userActivityHasMore = entries.length === 50;
+    state.userActivityOffset  = state.userActivity.length;
+    renderUserActivity();
+  } catch (err) {
+    console.error('[app] fetchUserActivity:', err.message);
+    list.innerHTML = `<div class="empty-state"><p class="empty-title">Failed to load activity</p><p class="empty-sub">${escHtml(err.message)}</p></div>`;
+    if (moreWrap) moreWrap.hidden = true;
+  }
+}
+
+function renderUserActivity() {
+  const list     = document.getElementById('user-activity-list');
+  const moreWrap = document.getElementById('user-activity-more');
+  if (!list) return;
+
+  if (state.userActivity.length === 0) {
+    list.innerHTML = `
+      <div class="empty-state">
+        <div class="empty-icon">🎶</div>
+        <p class="empty-title">No activity yet</p>
+        <p class="empty-sub">Track changes across your playlists will show up here.</p>
+      </div>`;
+    if (moreWrap) moreWrap.hidden = true;
+    return;
+  }
+
+  let html = '';
+  let currentLabel = null;
+  let open = false;
+  state.userActivity.forEach((e) => {
+    const label = activityDayLabel(e.created_at);
+    if (label !== currentLabel) {
+      if (open) html += '</div></div>';
+      currentLabel = label;
+      html += `<div class="day-label">${label}</div><div class="activity-card"><div class="journal-list">`;
+      open = true;
+    }
+    html += journalEntryHTML(e);
+  });
+  if (open) html += '</div></div>';
+
+  list.innerHTML = html;
+  if (moreWrap) moreWrap.hidden = !state.userActivityHasMore;
+}
+
+// ---------------------------------------------------------------------------
 // Render: Playlists (admin grid)
 // ---------------------------------------------------------------------------
 
@@ -1970,6 +2119,8 @@ function connectWebSocket() {
       const msg = JSON.parse(data);
       if (['track_added', 'track_removed', 'tracks_reordered'].includes(msg.type)) {
         if (state.view === 'admin') fetchPlaylists();
+        else if (state.view === 'playlists') fetchMyPlaylists();
+        else if (state.view === 'activity') fetchUserActivity();
         showSyncNotification(msg);
       } else if (msg.type === 'sync_status') {
         handleSyncStatus(msg);
@@ -2142,6 +2293,11 @@ function handleSyncStatus(msg) {
       sync_error_msg:   msg.message,
       sync_retry_after: msg.retry_after,
     });
+    // If it's our own status, refresh the sync pills on the hub.
+    if (String(msg.user_id) === String(state.userId)) {
+      state.myStatus = msg.status;
+      if (state.view === 'playlists') fetchMyPlaylists();
+    }
   }
 
   const hasIssue = msg.status === 'rate_limited' || msg.status === 'token_revoked' || msg.status === 'error';

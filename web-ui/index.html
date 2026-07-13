@@ -87,9 +87,9 @@
     <span class="logo-version" id="app-version"></span>
   </div>
   <div class="header-center" id="nav-tabs" hidden>
-    <button class="nav-tab nav-tab-active" data-view="my-playlists">My Playlists</button>
-    <button class="nav-tab" data-view="discover" id="tab-discover" hidden>Discover</button>
-    <button class="nav-tab" data-view="users">Users</button>
+    <button class="nav-tab nav-tab-active" data-view="playlists">Playlists</button>
+    <button class="nav-tab" data-view="users">People</button>
+    <button class="nav-tab" data-view="activity">Activity</button>
     <button class="nav-tab" data-view="admin">Admin</button>
   </div>
   <div class="header-right">
@@ -134,49 +134,74 @@
   </div>
 </div>
 
-<!-- ===================== MY PLAYLISTS VIEW ===================== -->
-<div id="my-playlists-view" class="view" hidden>
+<!-- ===================== PLAYLISTS HUB ===================== -->
+<div id="playlists-view" class="view" hidden>
   <main class="main">
+    <div class="hub-head">
+      <div>
+        <h1 class="hub-title">Your Playlists</h1>
+        <div class="hub-sub" id="playlists-sub">Loading…</div>
+      </div>
+      <div class="hub-actions">
+        <button class="btn btn-secondary btn-sm" id="open-discover-btn">Discover public</button>
+        <button id="open-create-btn" class="btn btn-primary btn-sm">＋ New Playlist</button>
+      </div>
+    </div>
 
-    <!-- My Playlists (owned) -->
-    <section class="section">
-      <div class="section-header">
-        <h2 class="section-title">My Playlists</h2>
-        <button id="open-create-btn" class="btn btn-primary btn-sm">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
-          New Playlist
-        </button>
-      </div>
-      <div id="owned-playlists-list" class="my-links-list">
-        <div class="loading-state"><div class="spinner"></div><span>Loading…</span></div>
-      </div>
-    </section>
+    <div class="hiw" id="hiw-strip" hidden>
+      <span class="hiw-icon">💡</span>
+      <span class="hiw-text"><b>How it works:</b> make a playlist in Tidal (or let us create one), then link it to a shared playlist here — every add and remove syncs to everyone. Linking merges existing songs both ways.</span>
+      <button class="hiw-x" id="hiw-dismiss" aria-label="Dismiss">&times;</button>
+    </div>
 
-    <!-- Joined Playlists -->
-    <section class="section section-mt">
-      <div class="section-header">
-        <h2 class="section-title">Joined Playlists</h2>
-      </div>
-      <div id="joined-playlists-list" class="my-links-list">
-        <div class="loading-state"><div class="spinner"></div><span>Loading…</span></div>
-      </div>
-    </section>
-
+    <div id="playlists-hub" class="pl-grid">
+      <div class="loading-state"><div class="spinner"></div><span>Loading…</span></div>
+    </div>
   </main>
 </div>
 
-<!-- ===================== DISCOVER VIEW ===================== -->
+<!-- ===================== DISCOVER (reached via the hub, not a top tab) ===================== -->
 <div id="discover-view" class="view" hidden>
   <main class="main">
-    <section class="section">
-      <div class="section-header">
-        <h2 class="section-title">Discover Playlists</h2>
-        <button class="btn btn-ghost btn-sm" id="refresh-discover-btn">Refresh</button>
+    <div class="hub-head">
+      <div>
+        <button class="btn btn-ghost btn-sm" id="discover-back-btn">&larr; Your Playlists</button>
+        <h1 class="hub-title" style="margin-top:.5rem">Discover public playlists</h1>
+        <div class="hub-sub">Public playlists other people have shared on this server.</div>
       </div>
-      <div id="discover-list" class="my-links-list">
-        <div class="loading-state"><div class="spinner"></div><span>Loading…</span></div>
+      <button class="btn btn-ghost btn-sm" id="refresh-discover-btn">Refresh</button>
+    </div>
+    <div id="discover-list" class="my-links-list">
+      <div class="loading-state"><div class="spinner"></div><span>Loading…</span></div>
+    </div>
+  </main>
+</div>
+
+<!-- ===================== ACTIVITY VIEW (user-facing) ===================== -->
+<div id="activity-view" class="view" hidden>
+  <main class="main">
+    <div class="hub-head">
+      <div>
+        <h1 class="hub-title">Activity</h1>
+        <div class="hub-sub">Everything added or removed across your playlists.</div>
       </div>
-    </section>
+      <div class="filters-bar">
+        <select class="form-select form-select-sm" id="activity-filter-playlist">
+          <option value="">All playlists</option>
+        </select>
+        <select class="form-select form-select-sm" id="activity-filter-action">
+          <option value="">All actions</option>
+          <option value="added">Added</option>
+          <option value="removed">Removed</option>
+        </select>
+      </div>
+    </div>
+    <div id="user-activity-list">
+      <div class="loading-state"><div class="spinner"></div><span>Loading…</span></div>
+    </div>
+    <div id="user-activity-more" class="journal-load-more" hidden>
+      <button class="btn btn-ghost btn-sm" id="user-activity-more-btn">Load more</button>
+    </div>
   </main>
 </div>
 
@@ -185,7 +210,8 @@
   <main class="main">
     <section class="section">
       <div class="section-header">
-        <h2 class="section-title">Users</h2>
+        <h2 class="section-title">People</h2>
+        <span class="hub-sub">Everyone using this server, and whether they're online.</span>
       </div>
       <div id="all-users-list" class="users-list">
         <div class="loading-state"><div class="spinner"></div><span>Loading users…</span></div>
@@ -365,12 +391,31 @@
             </label>
           </div>
         </div>
+        <div class="form-group">
+          <label class="form-label">Tidal playlist</label>
+          <div class="radio-group">
+            <label class="radio-label">
+              <input type="radio" name="create-source" value="fresh" checked />
+              ⚡ Create a fresh empty one for me
+              <span class="radio-hint">We'll make a new playlist in your Tidal account — nothing to set up first</span>
+            </label>
+            <label class="radio-label">
+              <input type="radio" name="create-source" value="existing" />
+              🔗 Link one of my existing Tidal playlists
+              <span class="radio-hint">Its songs will be added to the shared playlist for everyone</span>
+            </label>
+          </div>
+        </div>
         <p class="form-error" id="create-error"></p>
       </div>
 
-      <!-- Step 2: Pick Tidal playlist -->
+      <!-- Step 2: Pick an existing Tidal playlist (only when "link existing") -->
       <div id="create-step-2" hidden>
         <p class="link-step-label">Which of your Tidal playlists should sync with this?</p>
+        <div class="welcome-callout" style="margin:0 0 1rem">
+          <span class="wc-icon">🔀</span>
+          <span><b>Linking merges the two playlists.</b> Every song already in the Tidal playlist you pick gets added to this shared playlist and pushed to everyone in it. Pick an empty playlist for a clean start.</span>
+        </div>
         <div class="select-list" id="create-tidal-list">
           <div class="loading-state"><div class="spinner"></div><span>Loading your Tidal playlists…</span></div>
         </div>
