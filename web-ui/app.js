@@ -135,6 +135,14 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('refresh-discover-btn').addEventListener('click', fetchDiscover);
   document.getElementById('open-discover-btn').addEventListener('click', () => switchView('discover'));
   document.getElementById('discover-back-btn').addEventListener('click', () => switchView('playlists'));
+  document.getElementById('reconnect-btn').addEventListener('click', handleSignIn);
+  // Admin sub-tabs
+  document.querySelectorAll('#admin-subtabs .subtab').forEach((btn) => {
+    btn.addEventListener('click', () => switchAdminTab(btn.dataset.atab));
+  });
+  document.getElementById('admin-activity-link').addEventListener('click', (e) => {
+    e.preventDefault(); switchAdminTab('activity');
+  });
   document.getElementById('hiw-dismiss').addEventListener('click', () => {
     localStorage.setItem('hiw_dismissed', '1');
     document.getElementById('hiw-strip').hidden = true;
@@ -780,15 +788,24 @@ function renderPlaylistsHub(ownedLinks, joinedLinks, unlinkedOwned, counts) {
   const hiw = document.getElementById('hiw-strip');
   const total = ownedLinks.length + joinedLinks.length + unlinkedOwned.length;
 
+  // Reconnect banner — shown when the user's own Tidal token is dead.
+  const rb = document.getElementById('reconnect-banner');
+  if (rb) {
+    const dead = state.myStatus === 'token_revoked' || state.myStatus === 'error';
+    rb.hidden = !dead;
+  }
+
   if (total === 0) {
     hiw.hidden = true;
     sub.textContent = 'Nothing here yet — create your first one below.';
+    hub.classList.remove('pl-grid'); // welcome is a single centered card, not a grid item
     hub.innerHTML = welcomeHTML();
     document.getElementById('welcome-create')?.addEventListener('click', openCreateModal);
     document.getElementById('welcome-discover')?.addEventListener('click', () => switchView('discover'));
     return;
   }
 
+  hub.classList.add('pl-grid');
   hiw.hidden = localStorage.getItem('hiw_dismissed') === '1';
   sub.textContent = `${total} playlist${total === 1 ? '' : 's'}`;
 
@@ -1425,6 +1442,64 @@ async function refreshAdmin() {
   state.journalOffset = 0;
   state.journalEntries = [];
   await fetchJournal();
+  renderAdminOverview();
+}
+
+// Admin sub-tab switcher — panels are #admin-panel-<name>, all in the DOM.
+function switchAdminTab(name) {
+  state.adminTab = name;
+  document.querySelectorAll('#admin-subtabs .subtab').forEach((b) =>
+    b.classList.toggle('active', b.dataset.atab === name));
+  ['overview', 'playlists', 'users', 'activity', 'settings'].forEach((n) => {
+    const p = document.getElementById(`admin-panel-${n}`);
+    if (p) p.hidden = n !== name;
+  });
+  if (name === 'overview') renderAdminOverview();
+}
+
+function renderAdminOverview() {
+  // Attention banner — surfaces users whose sync is broken.
+  const att = document.getElementById('admin-attention');
+  if (att) {
+    const broken = (state.users || []).filter(
+      (u) => u.sync_status === 'token_revoked' || u.sync_status === 'error');
+    if (broken.length === 0) {
+      att.hidden = true;
+    } else {
+      const names = broken.map((u) => escHtml(u.display_name || u.user_id)).join(', ');
+      att.hidden = false;
+      att.innerHTML = `<span aria-hidden="true">⚠️</span><span><b>${broken.length} user${broken.length === 1 ? '' : 's'} need${broken.length === 1 ? 's' : ''} attention</b> — ${names} can't sync until ${broken.length === 1 ? 'they reconnect' : 'they reconnect'} their Tidal account. <a href="#" id="admin-attention-link" style="color:inherit;text-decoration:underline">See in Users &rarr;</a></span>`;
+      document.getElementById('admin-attention-link')?.addEventListener('click', (e) => {
+        e.preventDefault(); switchAdminTab('users');
+      });
+    }
+  }
+
+  // Recent activity snapshot — top 5 journal entries.
+  const ra = document.getElementById('admin-recent-activity');
+  if (ra) {
+    const recent = (state.journalEntries || []).slice(0, 5);
+    ra.innerHTML = recent.length
+      ? recent.map(journalEntryHTML).join('')
+      : '<div class="empty-state"><p class="empty-sub">No activity yet.</p></div>';
+  }
+
+  // System health.
+  const health = document.getElementById('admin-health');
+  if (health) {
+    const pollSec   = Math.round((state.adminSettings.poll_interval_ms || 30000) / 1000);
+    const errCount  = (state.users || []).filter(
+      (u) => u.sync_status === 'token_revoked' || u.sync_status === 'error').length;
+    const rateCount = (state.users || []).filter((u) => u.sync_status === 'rate_limited').length;
+    const rows = [
+      ['Poll interval', `${pollSec}s`],
+      ['Linked users', String((state.users || []).length)],
+      ['Sync errors', errCount ? `<span style="color:#ffb454">${errCount}</span>` : '0'],
+      ['Rate-limited', rateCount ? `<span style="color:#ffb454">${rateCount}</span>` : '0'],
+    ];
+    health.innerHTML = rows.map(([k, v]) =>
+      `<div class="health-row"><span class="health-name">${k}</span><span>${v}</span></div>`).join('');
+  }
 }
 
 async function fetchPlaylists() {

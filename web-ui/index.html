@@ -137,6 +137,11 @@
 <!-- ===================== PLAYLISTS HUB ===================== -->
 <div id="playlists-view" class="view" hidden>
   <main class="main">
+    <div class="reconnect-banner" id="reconnect-banner" hidden>
+      <span aria-hidden="true">🔌</span>
+      <span class="rb-text" id="reconnect-text">Your Tidal connection expired — syncing is paused.</span>
+      <button class="btn btn-primary btn-sm" id="reconnect-btn">Reconnect Tidal</button>
+    </div>
     <div class="hub-head">
       <div>
         <h1 class="hub-title">Your Playlists</h1>
@@ -223,12 +228,119 @@
 <!-- ===================== ADMIN VIEW ===================== -->
 <div id="admin-view" class="view" hidden>
   <main class="main">
+    <div class="hub-head">
+      <div>
+        <h1 class="hub-title">Admin</h1>
+        <div class="hub-sub">Server-wide controls — only visible to admins.</div>
+      </div>
+      <button class="btn btn-ghost btn-sm" id="refresh-btn" title="Refresh data">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true">
+          <path d="M1 4v6h6M23 20v-6h-6"/>
+          <path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4-4.64 4.36A9 9 0 0 1 3.51 15"/>
+        </svg>
+        Refresh
+      </button>
+    </div>
+
+    <div class="subtabs" id="admin-subtabs">
+      <button class="subtab active" data-atab="overview">Overview</button>
+      <button class="subtab" data-atab="playlists">Playlists</button>
+      <button class="subtab" data-atab="users">Users</button>
+      <button class="subtab" data-atab="activity">Activity</button>
+      <button class="subtab" data-atab="settings">Settings</button>
+    </div>
+
+    <!-- Overview -->
+    <section class="admin-panel" id="admin-panel-overview">
+      <div class="attention" id="admin-attention" hidden></div>
+
+      <section class="stats-grid" aria-label="Server statistics">
+        <div class="stat-card">
+          <div class="stat-value" id="stat-playlists">—</div>
+          <div class="stat-label">Shared Playlists</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value" id="stat-tracks">—</div>
+          <div class="stat-label">Total Tracks</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value" id="stat-users">—</div>
+          <div class="stat-label">Linked Users</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value" id="stat-online">—</div>
+          <div class="stat-label">Recently Active</div>
+        </div>
+        <div class="stat-card stat-card-clickable" id="stat-journal-card" title="Click to cycle time range">
+          <div class="stat-value" id="stat-journal">—</div>
+          <div class="stat-label" id="stat-journal-label">Journal Events</div>
+        </div>
+      </section>
+
+      <div class="admin-grid">
+        <div class="panel">
+          <h3>Recent activity <a href="#" id="admin-activity-link">View all &rarr;</a></h3>
+          <div class="journal-list" id="admin-recent-activity">
+            <div class="loading-state"><div class="spinner"></div><span>Loading…</span></div>
+          </div>
+        </div>
+        <div class="panel">
+          <h3>System health</h3>
+          <div id="admin-health">
+            <div class="loading-state"><div class="spinner"></div></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Playlists -->
+    <section class="admin-panel" id="admin-panel-playlists" hidden>
+      <div class="section-header"><h2 class="section-title">All Playlists</h2></div>
+      <div id="playlists-grid" class="playlists-grid">
+        <div class="loading-state"><div class="spinner"></div><span>Loading playlists…</span></div>
+      </div>
+    </section>
+
+    <!-- Users -->
+    <section class="admin-panel" id="admin-panel-users" hidden>
+      <div class="section-header"><h2 class="section-title">Users</h2></div>
+      <div id="users-list" class="users-list">
+        <div class="loading-state"><div class="spinner"></div><span>Loading users…</span></div>
+      </div>
+    </section>
+
+    <!-- Activity Journal -->
+    <section class="admin-panel" id="admin-panel-activity" hidden>
+      <div class="section-header">
+        <h2 class="section-title">Activity Journal</h2>
+        <div class="journal-filters">
+          <select class="form-select form-select-sm" id="journal-filter-action">
+            <option value="">All Actions</option>
+            <option value="added">Added</option>
+            <option value="removed">Removed</option>
+          </select>
+          <select class="form-select form-select-sm" id="journal-filter-playlist">
+            <option value="">All Playlists</option>
+          </select>
+          <button class="btn btn-ghost btn-sm" id="journal-refresh-btn" title="Refresh journal">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true">
+              <path d="M1 4v6h6M23 20v-6h-6"/>
+              <path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4-4.64 4.36A9 9 0 0 1 3.51 15"/>
+            </svg>
+            Refresh
+          </button>
+        </div>
+      </div>
+      <div id="journal-list" class="journal-list">
+        <div class="loading-state"><div class="spinner"></div><span>Loading journal…</span></div>
+      </div>
+      <div id="journal-load-more" class="journal-load-more" hidden>
+        <button class="btn btn-ghost btn-sm" id="journal-load-more-btn">Load more</button>
+      </div>
+    </section>
 
     <!-- Settings -->
-    <section class="section">
-      <div class="section-header">
-        <h2 class="section-title">Settings</h2>
-      </div>
+    <section class="admin-panel" id="admin-panel-settings" hidden>
       <div class="settings-panel">
         <div class="settings-row">
           <div class="settings-label">
@@ -270,87 +382,6 @@
             <button class="btn btn-secondary btn-sm" id="api-key-copy-btn">Copy</button>
           </div>
         </div>
-      </div>
-    </section>
-
-    <!-- Stats -->
-    <section class="stats-grid" aria-label="Server statistics">
-      <div class="stat-card">
-        <div class="stat-value" id="stat-playlists">—</div>
-        <div class="stat-label">Shared Playlists</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-value" id="stat-tracks">—</div>
-        <div class="stat-label">Total Tracks</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-value" id="stat-users">—</div>
-        <div class="stat-label">Linked Users</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-value" id="stat-online">—</div>
-        <div class="stat-label">Recently Active</div>
-      </div>
-      <div class="stat-card stat-card-clickable" id="stat-journal-card" title="Click to cycle time range">
-        <div class="stat-value" id="stat-journal">—</div>
-        <div class="stat-label" id="stat-journal-label">Journal Events</div>
-      </div>
-    </section>
-
-    <!-- Playlists -->
-    <section class="section">
-      <div class="section-header">
-        <h2 class="section-title">All Playlists</h2>
-        <button class="btn btn-ghost btn-sm" id="refresh-btn" title="Refresh data">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true">
-            <path d="M1 4v6h6M23 20v-6h-6"/>
-            <path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4-4.64 4.36A9 9 0 0 1 3.51 15"/>
-          </svg>
-          Refresh
-        </button>
-      </div>
-      <div id="playlists-grid" class="playlists-grid">
-        <div class="loading-state"><div class="spinner"></div><span>Loading playlists…</span></div>
-      </div>
-    </section>
-
-    <!-- Users -->
-    <section class="section">
-      <div class="section-header">
-        <h2 class="section-title">Recent Users</h2>
-      </div>
-      <div id="users-list" class="users-list">
-        <div class="loading-state"><div class="spinner"></div><span>Loading users…</span></div>
-      </div>
-    </section>
-
-    <!-- Activity Journal -->
-    <section class="section">
-      <div class="section-header">
-        <h2 class="section-title">Activity Journal</h2>
-        <div class="journal-filters">
-          <select class="form-select form-select-sm" id="journal-filter-action">
-            <option value="">All Actions</option>
-            <option value="added">Added</option>
-            <option value="removed">Removed</option>
-          </select>
-          <select class="form-select form-select-sm" id="journal-filter-playlist">
-            <option value="">All Playlists</option>
-          </select>
-          <button class="btn btn-ghost btn-sm" id="journal-refresh-btn" title="Refresh journal">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true">
-              <path d="M1 4v6h6M23 20v-6h-6"/>
-              <path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4-4.64 4.36A9 9 0 0 1 3.51 15"/>
-            </svg>
-            Refresh
-          </button>
-        </div>
-      </div>
-      <div id="journal-list" class="journal-list">
-        <div class="loading-state"><div class="spinner"></div><span>Loading journal…</span></div>
-      </div>
-      <div id="journal-load-more" class="journal-load-more" hidden>
-        <button class="btn btn-ghost btn-sm" id="journal-load-more-btn">Load more</button>
       </div>
     </section>
 
