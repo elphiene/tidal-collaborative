@@ -1589,10 +1589,10 @@ body.nav-open .hamburger-btn .hamburger-bar:nth-child(3) { transform: translateY
 }
 
 .form-select {
-  background: var(--surface-2);
+  background: var(--bg-input);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  color: var(--text);
+  color: var(--text-primary);
   padding: 0.35rem 0.6rem;
   font-size: 0.85rem;
   cursor: pointer;
@@ -1619,7 +1619,7 @@ body.nav-open .hamburger-btn .hamburger-bar:nth-child(3) { transform: translateY
   transition: background 0.1s;
 }
 .journal-entry:last-child { border-bottom: none; }
-.journal-entry:hover { background: var(--surface-2); }
+.journal-entry:hover { background: var(--bg-card-hover); }
 
 .journal-sentence { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 1.8; }
 .journal-verb   { font-weight: 600; }

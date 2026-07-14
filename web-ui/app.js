@@ -511,6 +511,7 @@ function showSignedOut() {
   document.getElementById('nav-tabs').hidden        = true;
   document.getElementById('user-display').hidden    = true;
   document.getElementById('signout-btn').hidden     = true;
+  document.getElementById('ws-status').hidden       = true;  // no connection status pre-sign-in
   clearInterval(state.usersViewTimer);
   state.usersViewTimer = null;
   hideSyncBanner();
@@ -521,6 +522,7 @@ function showSignedOut() {
 function showSignedIn() {
   document.getElementById('signed-out-view').hidden = true;
   document.getElementById('nav-tabs').hidden        = false;
+  document.getElementById('ws-status').hidden       = false;
   const userDisplay = document.getElementById('user-display');
   userDisplay.textContent = state.displayName ?? state.userId;
   userDisplay.hidden      = false;
@@ -2238,7 +2240,7 @@ function _applyWsStatus(online) {
   const el    = document.getElementById('ws-status');
   const label = el.querySelector('.ws-label');
   el.className      = `ws-status ${online ? 'ws-connected' : 'ws-disconnected'}`;
-  label.textContent = online ? 'Connected' : 'Disconnected';
+  label.textContent = online ? 'Live' : 'Reconnecting…';
 }
 
 function showSyncNotification(msg) {
