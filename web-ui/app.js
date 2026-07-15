@@ -180,11 +180,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('create-next-btn').addEventListener('click', handleCreateNext);
   document.getElementById('create-back-btn').addEventListener('click', handleCreateBack);
 
-  // Join modal (Discover)
+  // Join playlist modal (public join + invite code)
   document.getElementById('join-confirm-btn').addEventListener('click', handleJoinConfirm);
-
-  // Invite link modal (join via invite code)
-  document.getElementById('link-confirm-btn').addEventListener('click', handleLinkConfirm);
 
   // Invites management modal
   document.getElementById('generate-invite-btn').addEventListener('click', handleGenerateInvite);
@@ -749,13 +746,37 @@ function syncPillHTML() {
   return `<span class="pl-sync warn"><span class="dot"></span>${label}</span>`;
 }
 
+// Deterministic avatar colour from a name (stable across renders).
+function avatarColor(name) {
+  let h = 0;
+  for (const ch of String(name)) h = (h * 31 + ch.charCodeAt(0)) % 360;
+  return `hsl(${h} 62% 60%)`;
+}
+
+function avatarsHTML(memberNames) {
+  if (!memberNames) return '';
+  const names = memberNames.split('|').filter(Boolean);
+  if (names.length === 0) return '';
+  const shown = names.slice(0, 4);
+  const extra = names.length - shown.length;
+  const spans = shown.map((n) => {
+    const initial = (n.trim()[0] || '?').toUpperCase();
+    return `<span style="background:${avatarColor(n)}" title="${escHtml(n)}">${escHtml(initial)}</span>`;
+  });
+  if (extra > 0) spans.push(`<span style="background:var(--bg-card-hover);color:var(--text-secondary)">+${extra}</span>`);
+  return `<div class="avatars">${spans.join('')}</div>`;
+}
+
 function plCardHTML(o) {
-  // o: { role, spId, name, isPublic, linkId, tracks, members, unlinked }
+  // o: { role, spId, name, isPublic, linkId, tracks, members, memberNames, unlinked }
   const roleLabel = `${o.role} · ${o.isPublic ? 'Public' : 'Private'}`;
   const stats = `
     <div class="pl-stats">
       <div class="pl-stat"><div class="n">${o.unlinked ? '—' : o.tracks}</div><div class="l">tracks</div></div>
-      <div class="pl-stat"><div class="n">${o.members}</div><div class="l">member${o.members === 1 ? '' : 's'}</div></div>
+    </div>
+    <div class="pl-members">
+      ${avatarsHTML(o.memberNames)}
+      <span class="pl-activity">${o.members} member${o.members === 1 ? '' : 's'}</span>
     </div>`;
 
   const actions = [];
@@ -817,16 +838,18 @@ function renderPlaylistsHub(ownedLinks, joinedLinks, unlinkedOwned, counts) {
     isPublic: !!l.playlist_is_public, linkId: l.id,
     tracks: counts[l.shared_playlist_id]?.track_count ?? 0,
     members: counts[l.shared_playlist_id]?.user_count ?? 1,
+    memberNames: counts[l.shared_playlist_id]?.member_names,
   })));
   unlinkedOwned.forEach((p) => cards.push(plCardHTML({
     role: 'Owner', spId: p.id, name: p.name, isPublic: !!p.is_public, linkId: null,
-    tracks: p.track_count ?? 0, members: p.user_count ?? 1, unlinked: true,
+    tracks: p.track_count ?? 0, members: p.user_count ?? 1, memberNames: p.member_names, unlinked: true,
   })));
   joinedLinks.forEach((l) => cards.push(plCardHTML({
     role: 'Joined', spId: l.shared_playlist_id, name: l.shared_playlist_name,
     isPublic: !!l.playlist_is_public, linkId: l.id,
     tracks: counts[l.shared_playlist_id]?.track_count ?? 0,
     members: counts[l.shared_playlist_id]?.user_count ?? 1,
+    memberNames: counts[l.shared_playlist_id]?.member_names,
   })));
 
   hub.innerHTML = cards.join('');
@@ -1161,23 +1184,60 @@ function handleCreateBack() {
 // Join Modal (Discover tab — join a public playlist)
 // ---------------------------------------------------------------------------
 
+// One "pick a Tidal playlist to sync" modal drives both public-join (from
+// Discover) and invite-code join. state.joinFlow.target is spread into the
+// POST /api/links body — either { sharedPlaylistId } or { inviteCode }.
 async function openJoinModal(playlistId, playlistName) {
-  state.joinTargetPlaylist = { id: playlistId, name: playlistName };
-  state.joinSelectedTidal  = null;
+  state.joinFlow = { target: { sharedPlaylistId: playlistId }, name: playlistName, selectedTidal: null };
 
-  document.getElementById('join-modal-subtitle').textContent = playlistName;
+  document.getElementById('join-playlist-title').textContent    = 'Join Playlist';
+  document.getElementById('join-playlist-subtitle').textContent = playlistName;
   document.getElementById('join-confirm-btn').disabled = true;
 
-  openModal('join-modal');
+  openModal('join-playlist-modal');
 
   await loadTidalPlaylistsInto('join-tidal-list', (pl) => {
-    state.joinSelectedTidal = pl;
+    state.joinFlow.selectedTidal = pl;
     document.getElementById('join-confirm-btn').disabled = false;
   });
 }
 
+async function openInviteLinkModal(code) {
+  state.joinFlow = { target: { inviteCode: code }, name: '', selectedTidal: null };
+
+  document.getElementById('join-playlist-title').textContent    = 'Join with Invite';
+  document.getElementById('join-playlist-subtitle').textContent = 'Validating invite code…';
+  document.getElementById('join-confirm-btn').disabled          = true;
+  document.getElementById('join-tidal-list').innerHTML =
+    '<div class="loading-state"><div class="spinner"></div><span>Validating…</span></div>';
+
+  openModal('join-playlist-modal');
+
+  try {
+    const res = await apiFetch(`${BASE_URL}/api/invites/${encodeURIComponent(code)}`);
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}));
+      closeModal('join-playlist-modal');
+      toast(`Invalid invite: ${d.error ?? 'Code not found'}`, 'error');
+      return;
+    }
+    const { sharedPlaylistName } = await res.json();
+    state.joinFlow.name = sharedPlaylistName;
+    document.getElementById('join-playlist-subtitle').textContent = sharedPlaylistName;
+
+    await loadTidalPlaylistsInto('join-tidal-list', (pl) => {
+      state.joinFlow.selectedTidal = pl;
+      document.getElementById('join-confirm-btn').disabled = false;
+    });
+  } catch (err) {
+    closeModal('join-playlist-modal');
+    toast(`Failed to validate invite: ${err.message}`, 'error');
+  }
+}
+
 async function handleJoinConfirm() {
-  if (!state.joinTargetPlaylist || !state.joinSelectedTidal) return;
+  const flow = state.joinFlow;
+  if (!flow || !flow.selectedTidal) return;
 
   const btn = document.getElementById('join-confirm-btn');
   btn.disabled    = true;
@@ -1188,91 +1248,23 @@ async function handleJoinConfirm() {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify({
-        sharedPlaylistId:  state.joinTargetPlaylist.id,
-        tidalPlaylistId:   state.joinSelectedTidal.id,
-        tidalPlaylistName: state.joinSelectedTidal.name,
+        ...flow.target,
+        tidalPlaylistId:   flow.selectedTidal.id,
+        tidalPlaylistName: flow.selectedTidal.name,
       }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
 
-    closeModal('join-modal');
-    toast(`Joined "${state.joinTargetPlaylist.name}"`, 'success');
-    // Refresh both discover (to remove joined) and my playlists (to show new link)
-    await Promise.allSettled([fetchDiscover(), fetchMyPlaylists()]);
+    closeModal('join-playlist-modal');
+    toast(`Joined "${flow.name || 'playlist'}"`, 'success');
+    // Public join refreshes Discover too (to drop the now-joined playlist).
+    if (flow.target.sharedPlaylistId) await Promise.allSettled([fetchDiscover(), fetchMyPlaylists()]);
+    else await fetchMyPlaylists();
   } catch (err) {
     toast(`Join failed: ${err.message}`, 'error');
     btn.disabled    = false;
     btn.textContent = 'Join';
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Invite Link Modal (join via ?invite= URL or manually entered code)
-// ---------------------------------------------------------------------------
-
-async function openInviteLinkModal(code) {
-  state.resolvedInvite   = null;
-  state.linkSelectedTidal = null;
-
-  document.getElementById('link-modal-title').textContent    = 'Join with Invite';
-  document.getElementById('link-modal-subtitle').textContent = 'Validating invite code…';
-  document.getElementById('link-confirm-btn').disabled       = true;
-  document.getElementById('link-tidal-list').innerHTML =
-    '<div class="loading-state"><div class="spinner"></div><span>Validating…</span></div>';
-
-  openModal('link-modal');
-
-  try {
-    const res = await apiFetch(`${BASE_URL}/api/invites/${encodeURIComponent(code)}`);
-    if (!res.ok) {
-      const d = await res.json().catch(() => ({}));
-      closeModal('link-modal');
-      toast(`Invalid invite: ${d.error ?? 'Code not found'}`, 'error');
-      return;
-    }
-    const { sharedPlaylistId, sharedPlaylistName } = await res.json();
-    state.resolvedInvite = { sharedPlaylistId, sharedPlaylistName, code };
-
-    document.getElementById('link-modal-subtitle').textContent = sharedPlaylistName;
-
-    await loadTidalPlaylistsInto('link-tidal-list', (pl) => {
-      state.linkSelectedTidal = pl;
-      document.getElementById('link-confirm-btn').disabled = false;
-    });
-  } catch (err) {
-    closeModal('link-modal');
-    toast(`Failed to validate invite: ${err.message}`, 'error');
-  }
-}
-
-async function handleLinkConfirm() {
-  if (!state.resolvedInvite || !state.linkSelectedTidal) return;
-
-  const btn = document.getElementById('link-confirm-btn');
-  btn.disabled    = true;
-  btn.textContent = 'Joining…';
-
-  try {
-    const res = await apiFetch(`${BASE_URL}/api/links`, {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({
-        inviteCode:        state.resolvedInvite.code,
-        tidalPlaylistId:   state.linkSelectedTidal.id,
-        tidalPlaylistName: state.linkSelectedTidal.name,
-      }),
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
-
-    closeModal('link-modal');
-    toast(`Joined "${state.resolvedInvite.sharedPlaylistName}"`, 'success');
-    await fetchMyPlaylists();
-  } catch (err) {
-    toast(`Join failed: ${err.message}`, 'error');
-    btn.disabled    = false;
-    btn.textContent = 'Join Playlist';
   }
 }
 

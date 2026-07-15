@@ -460,50 +460,30 @@
   </div>
 </div>
 
-<!-- ===================== JOIN MODAL (Discover tab) ===================== -->
-<div id="join-modal" class="modal-overlay" aria-hidden="true" role="dialog"
-     aria-labelledby="join-modal-title" aria-modal="true">
+<!-- ===================== JOIN PLAYLIST MODAL (public join + invite code) ===================== -->
+<div id="join-playlist-modal" class="modal-overlay" aria-hidden="true" role="dialog"
+     aria-labelledby="join-playlist-title" aria-modal="true">
   <div class="modal">
     <div class="modal-header">
       <div>
-        <h3 class="modal-title" id="join-modal-title">Join Playlist</h3>
-        <p class="modal-subtitle" id="join-modal-subtitle"></p>
+        <h3 class="modal-title" id="join-playlist-title">Join Playlist</h3>
+        <p class="modal-subtitle" id="join-playlist-subtitle"></p>
       </div>
-      <button class="modal-close" data-close="join-modal" aria-label="Close">&times;</button>
+      <button class="modal-close" data-close="join-playlist-modal" aria-label="Close">&times;</button>
     </div>
     <div class="modal-body">
       <p class="link-step-label">Which of your Tidal playlists should sync with this?</p>
+      <div class="welcome-callout" style="margin:0 0 1rem">
+        <span class="wc-icon">🔀</span>
+        <span><b>Linking merges the two playlists.</b> Any songs already in the Tidal playlist you pick get added to this shared playlist and pushed to everyone in it. Pick an empty playlist for a clean join.</span>
+      </div>
       <div class="select-list" id="join-tidal-list">
         <div class="loading-state"><div class="spinner"></div><span>Loading your Tidal playlists…</span></div>
       </div>
     </div>
     <div class="modal-footer">
-      <button class="btn btn-ghost" data-close="join-modal">Cancel</button>
+      <button class="btn btn-ghost" data-close="join-playlist-modal">Cancel</button>
       <button class="btn btn-primary" id="join-confirm-btn" disabled>Join</button>
-    </div>
-  </div>
-</div>
-
-<!-- ===================== INVITE LINK MODAL (join via invite code) ===================== -->
-<div id="link-modal" class="modal-overlay" aria-hidden="true" role="dialog"
-     aria-labelledby="link-modal-title" aria-modal="true">
-  <div class="modal">
-    <div class="modal-header">
-      <div>
-        <h3 class="modal-title" id="link-modal-title">Join with Invite</h3>
-        <p class="modal-subtitle" id="link-modal-subtitle"></p>
-      </div>
-      <button class="modal-close" data-close="link-modal" aria-label="Close">&times;</button>
-    </div>
-    <div class="modal-body">
-      <p class="link-step-label">Which of your Tidal playlists should sync with this?</p>
-      <div class="select-list" id="link-tidal-list">
-        <div class="loading-state"><div class="spinner"></div><span>Loading your Tidal playlists…</span></div>
-      </div>
-    </div>
-    <div class="modal-footer">
-      <button class="btn btn-ghost" data-close="link-modal">Cancel</button>
-      <button class="btn btn-primary" id="link-confirm-btn" disabled>Join Playlist</button>
     </div>
   </div>
 </div>

@@ -116,12 +116,20 @@ function close() {
 // shared_playlists
 // ---------------------------------------------------------------------------
 
+// Pipe-joined member display names per playlist — feeds the card avatar cluster.
+const MEMBER_NAMES_SUBQUERY = `
+  (SELECT GROUP_CONCAT(COALESCE(u2.display_name, pl2.user_id), '|')
+     FROM playlist_links pl2
+     LEFT JOIN users u2 ON u2.user_id = pl2.user_id
+    WHERE pl2.shared_playlist_id = sp.id) AS member_names`;
+
 function getSharedPlaylists(userId = null) {
   if (!userId) {
     return db.prepare(`
       SELECT sp.*,
         COUNT(DISTINCT pl.user_id)                                     AS user_count,
-        COUNT(DISTINCT CASE WHEN t.removed_at IS NULL THEN t.id END)  AS track_count
+        COUNT(DISTINCT CASE WHEN t.removed_at IS NULL THEN t.id END)  AS track_count,
+        ${MEMBER_NAMES_SUBQUERY}
       FROM shared_playlists sp
       LEFT JOIN playlist_links pl ON pl.shared_playlist_id = sp.id
       LEFT JOIN tracks         t  ON t.shared_playlist_id  = sp.id
@@ -131,7 +139,8 @@ function getSharedPlaylists(userId = null) {
   return db.prepare(`
     SELECT sp.*,
       COUNT(DISTINCT pl.user_id)                                     AS user_count,
-      COUNT(DISTINCT CASE WHEN t.removed_at IS NULL THEN t.id END)  AS track_count
+      COUNT(DISTINCT CASE WHEN t.removed_at IS NULL THEN t.id END)  AS track_count,
+      ${MEMBER_NAMES_SUBQUERY}
     FROM shared_playlists sp
     LEFT JOIN playlist_links pl ON pl.shared_playlist_id = sp.id
     LEFT JOIN tracks         t  ON t.shared_playlist_id  = sp.id

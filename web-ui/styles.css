@@ -1699,6 +1699,7 @@ body.nav-open .hamburger-btn .hamburger-bar:nth-child(3) { transform: translateY
 .pl-stats { display: flex; gap: 1.4rem; }
 .pl-stat .n { font-size: 1.25rem; font-weight: 700; }
 .pl-stat .l { font-size: 0.72rem; color: var(--text-secondary); }
+.pl-members { display: flex; align-items: center; gap: 0.6rem; }
 .pl-activity { font-size: 0.78rem; color: var(--text-muted); }
 .pl-activity b { color: var(--text-secondary); font-weight: 500; }
 .pl-foot { display: flex; flex-wrap: wrap; gap: 0.4rem; padding-top: 0.6rem; border-top: 1px solid var(--border); margin-top: 0.1rem; }
