@@ -844,7 +844,13 @@ router.get('/users/all', (req, res) => {
 // ---------------------------------------------------------------------------
 
 router.get('/journal', (req, res) => {
-  if (!req.session.adminAuthed && !req.readAuth) return res.status(403).json({ error: 'Admin auth required' });
+  // Admin / API-key see all activity; a regular signed-in user sees only
+  // activity for playlists they're a member of; anyone else is rejected.
+  const privileged = req.session.adminAuthed || req.readAuth;
+  if (!privileged && !req.session.userId) {
+    return res.status(401).json({ error: 'Not signed in' });
+  }
+  const memberUserId = privileged ? null : req.session.userId;
 
   const sharedPlaylistId = req.query.playlist_id ? parseInt(req.query.playlist_id, 10) : null;
   const action           = ['added', 'removed'].includes(req.query.action) ? req.query.action : null;
@@ -856,7 +862,7 @@ router.get('/journal', (req, res) => {
   }
 
   try {
-    const entries = db.getJournalPage({ sharedPlaylistId, action, limit, offset });
+    const entries = db.getJournalPage({ sharedPlaylistId, action, limit, offset, memberUserId });
     // Attach the human-readable tag to each entry
     const { buildTag } = require('../poller');
     const result = entries.map(e => ({

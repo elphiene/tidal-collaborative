@@ -620,11 +620,16 @@ function getJournalEntriesAfter(sharedPlaylistId, afterId) {
  * Paginated journal query for the admin UI.
  * Returns entries newest-first with display_name and playlist_name joined.
  */
-function getJournalPage({ sharedPlaylistId = null, action = null, limit = 50, offset = 0 } = {}) {
+function getJournalPage({ sharedPlaylistId = null, action = null, limit = 50, offset = 0, memberUserId = null } = {}) {
   const where = [];
   const args  = [];
   if (sharedPlaylistId) { where.push('mj.shared_playlist_id = ?'); args.push(sharedPlaylistId); }
   if (action)           { where.push('mj.action = ?');             args.push(action); }
+  // Scope to playlists this user belongs to (regular users on the Activity page).
+  if (memberUserId)     {
+    where.push('mj.shared_playlist_id IN (SELECT shared_playlist_id FROM playlist_links WHERE user_id = ?)');
+    args.push(memberUserId);
+  }
   const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : '';
   args.push(Math.min(limit, 200), offset);
   return db.prepare(`
